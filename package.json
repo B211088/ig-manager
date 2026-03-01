@@ -1,0 +1,19 @@
+{
+  "name": "ig-manager",
+  "version": "2.0.0",
+  "description": "Instagram 2FA Manager - Multi-thread Terminal UI",
+  "main": "manager.js",
+  "scripts": {
+    "start": "node manager.js",
+    "worker": "node worker.js"
+  },
+  "dependencies": {
+    "blessed": "^0.1.81",
+    "blessed-contrib": "^4.11.0",
+    "playwright-core": "^1.40.0",
+    "imap-simple": "^5.1.0",
+    "mailparser": "^3.6.5",
+    "node-2fa": "^2.0.3",
+    "speakeasy": "^2.0.0"
+  }
+}
