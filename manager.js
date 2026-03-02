@@ -1378,10 +1378,9 @@ class IGManagerUI {
     const progLines = this.config.threads.slice(0, 3).map((t) => {
       const stats = getThreadStats(t.dataDir);
       const total = stats.input || 1;
-      const pct = Math.round((stats.success / total) * 100);
-      const bar =
-        "█".repeat(Math.floor(pct / 5)) +
-        "░".repeat(20 - Math.floor(pct / 5));
+      const pct = Math.min(100, Math.max(0, Math.round((stats.success / total) * 100)));
+      const filled = Math.min(20, Math.max(0, Math.floor(pct / 5)));
+      const bar = "█".repeat(filled) + "░".repeat(20 - filled);
       const running = this.runningProcesses.has(t.id);
       const color = running ? "green-fg" : "gray-fg";
       return ` {${color}}${t.name.padEnd(10)}{/} [${bar}] ${pct}% (${stats.success}/${total})`;

@@ -1,6 +1,9 @@
 /**
- * WORKER.JS v6.1
- * Tất cả selectors được gán đúng từ const SELECTORS
+ * WORKER.JS v6.3 - FIXED HOTMAIL SAVE/REMOVE
+ * Fix: hotmail lưu đúng vào success.txt khi thành công
+ * Fix: nếu add hotmail thất bại → lưu vào no_hotmail.txt (đã bật 2FA, chưa add hotmail)
+ * Fix: xóa hotmail khỏi file đúng cách
+ * Fix: không duplicate writeSuccessAccount (bỏ lần gọi thừa trong main())
  */
 
 "use strict";
@@ -30,6 +33,8 @@ const DATA_DIR = path.isAbsolute(cfg.dataDir)
 const INPUT_FILE = path.join(DATA_DIR, "input.txt");
 const OUTPUT_FILE = path.join(DATA_DIR, "success.txt");
 const FAILED_FILE = path.join(DATA_DIR, "failed.txt");
+// File mới: đã bật 2FA thành công nhưng chưa add được hotmail
+const NO_HOTMAIL_FILE = path.join(DATA_DIR, "no_hotmail.txt");
 const SCREENSHOT_DIR = path.join(DATA_DIR, "screenshots");
 const HOTMAIL_FILE = cfg.hotmailFile
   ? path.isAbsolute(cfg.hotmailFile)
@@ -38,7 +43,7 @@ const HOTMAIL_FILE = cfg.hotmailFile
   : path.join(DATA_DIR, "hotmail.txt");
 
 // ============================================================================
-// SELECTORS — nguồn sự thật duy nhất, dùng xuyên suốt code
+// SELECTORS
 // ============================================================================
 
 const SELECTORS = {
@@ -476,11 +481,6 @@ function readHotmailFile() {
     .filter(Boolean);
 }
 
-/**
- * getHotmailVerificationCode
- * Dùng SELECTORS.HOTMAIL không (dongvanfb.net có selector riêng)
- * Giữ nguyên selector gốc của site đó
- */
 async function getHotmailVerificationCode(page, hotmailData) {
   const url = cfg.hotmailApiUrl || "https://dongvanfb.net/read_mail_box/";
   const emailLine = `${hotmailData.hotmail}|${hotmailData.hotmailPassword}|${hotmailData.refreshToken}|${hotmailData.clientId}`;
@@ -535,22 +535,47 @@ async function getHotmailVerificationCode(page, hotmailData) {
   }
 }
 
+/**
+ * Xóa một hotmail khỏi file hotmail.txt sau khi đã dùng thành công
+ */
 function removeHotmailFromFile(hotmail) {
   try {
-    if (!fs.existsSync(HOTMAIL_FILE)) return;
+    log(`🗑️ Removing hotmail from file: ${hotmail}`);
+    log(`🔍 HOTMAIL_FILE = ${HOTMAIL_FILE}`);
+
+    if (!fs.existsSync(HOTMAIL_FILE)) {
+      log(`⚠️ HOTMAIL_FILE không tồn tại: ${HOTMAIL_FILE}`);
+      return;
+    }
+
     const content = fs.readFileSync(HOTMAIL_FILE, "utf-8");
-    const remaining = content
-      .trim()
+    const lines = content.split("\n").filter((l) => l.trim());
+
+    log(`🔍 Total lines in hotmail.txt = ${lines.length}`);
+
+    const remaining = lines.filter((line) => {
+      const lineEmail = line.split("|")[0]?.trim();
+      const matches = lineEmail === hotmail;
+      if (matches) log(`🔍 Found & removing: "${lineEmail}"`);
+      return !matches;
+    });
+
+    if (remaining.length === lines.length) {
+      log(`⚠️ Hotmail "${hotmail}" NOT FOUND in file — không xóa`);
+      return;
+    }
+
+    const newContent = remaining.join("\n") + (remaining.length ? "\n" : "");
+    fs.writeFileSync(HOTMAIL_FILE, newContent, "utf-8");
+
+    // Verify
+    const verifyLines = fs
+      .readFileSync(HOTMAIL_FILE, "utf-8")
       .split("\n")
-      .filter((line) => line.split("|")[0]?.trim() !== hotmail);
-    fs.writeFileSync(
-      HOTMAIL_FILE,
-      remaining.join("\n") + (remaining.length ? "\n" : ""),
-      "utf-8",
-    );
-    log(`🗑️ Removed hotmail: ${hotmail}`);
+      .filter((l) => l.trim());
+    log(`✅ Removed hotmail: ${hotmail} (${verifyLines.length} lines remaining)`);
   } catch (e) {
-    log(`⚠️ Remove hotmail error: ${e.message}`);
+    log(`❌ Remove hotmail error: ${e.message}`);
   }
 }
 
@@ -581,10 +606,20 @@ function readInputFile() {
     });
 }
 
-function writeSuccessAccount(account, twoFA, hotmailData) {
-  const safeTwoFA = twoFA.includes(" ")
-    ? twoFA
-    : (twoFA.match(/.{1,4}/g) || [twoFA]).join(" ");
+/**
+ * Lưu vào success.txt — kèm hotmail nếu có
+ * Format: username|password|2fa_secret|igEmail|gmxMail|gmxPassword|posts|followers|following|hmEmail|hmPassword|hmRefreshToken|hmClientId|cookies
+ */
+function writeSuccessAccount(account, twoFASecret, hotmailData) {
+  const safeTwoFA = twoFASecret.includes(" ")
+    ? twoFASecret
+    : (twoFASecret.match(/.{1,4}/g) || [twoFASecret]).join(" ");
+
+  const hmEmail = hotmailData?.hotmail || "";
+  const hmPassword = hotmailData?.hotmailPassword || "";
+  const hmRefreshToken = hotmailData?.refreshToken || "";
+  const hmClientId = hotmailData?.clientId || "";
+
   const line =
     [
       account.username,
@@ -596,15 +631,48 @@ function writeSuccessAccount(account, twoFA, hotmailData) {
       account.posts,
       account.followers,
       account.following,
-      hotmailData?.hotmail || "",
-      hotmailData?.hotmailPassword || "",
-      hotmailData?.refreshToken || "",
-      hotmailData?.clientId || "",
+      hmEmail,
+      hmPassword,
+      hmRefreshToken,
+      hmClientId,
       account.cookies || "",
     ].join("|") + "\n";
+
   fs.appendFileSync(OUTPUT_FILE, line, "utf-8");
+  log(`💾 Saved to success.txt: ${account.username} | hotmail: ${hmEmail || "none"}`);
 }
 
+/**
+ * Lưu vào no_hotmail.txt — đã bật 2FA thành công nhưng add hotmail thất bại
+ * Format: username|password|2fa_secret|igEmail|gmxMail|gmxPassword|posts|followers|following|cookies|hotmail_error
+ */
+function writeNoHotmailAccount(account, twoFASecret, hotmailError) {
+  const safeTwoFA = twoFASecret.includes(" ")
+    ? twoFASecret
+    : (twoFASecret.match(/.{1,4}/g) || [twoFASecret]).join(" ");
+
+  const line =
+    [
+      account.username,
+      account.password,
+      safeTwoFA,
+      account.igEmail,
+      account.gmxMail,
+      account.gmxPassword,
+      account.posts,
+      account.followers,
+      account.following,
+      account.cookies || "",
+      hotmailError || "hotmail_add_failed",
+    ].join("|") + "\n";
+
+  fs.appendFileSync(NO_HOTMAIL_FILE, line, "utf-8");
+  log(`📝 Saved to no_hotmail.txt: ${account.username} (reason: ${hotmailError})`);
+}
+
+/**
+ * Lưu vào failed.txt — toàn bộ thất bại (sai cookie, lỗi 2FA, v.v.)
+ */
 function writeFailedAccount(account, reason) {
   const line = `${account.username}|${account.password}|${account.igEmail}|${account.gmxMail}|${account.gmxPassword}|${account.posts}|${account.followers}|${account.following}|${account.cookies}|${reason}\n`;
   fs.appendFileSync(FAILED_FILE, line, "utf-8");
@@ -623,7 +691,7 @@ function removeAccountFromInput(username) {
       remaining.join("\n") + (remaining.length ? "\n" : ""),
       "utf-8",
     );
-    log(`🗑️ Removed: ${username}`);
+    log(`🗑️ Removed from input: ${username}`);
   } catch (e) {
     log(`⚠️ Remove error: ${e.message}`);
   }
@@ -857,7 +925,57 @@ async function handlePostSetupDialogs(page, account) {
 }
 
 // ============================================================================
-// ADD HOTMAIL — dùng SELECTORS.HOTMAIL.*
+// LOGIN CHALLENGE HANDLER
+// ============================================================================
+
+async function handleLoginChallengeDialog(page, TWO_FA_URL) {
+  const hasChallenge = await page.evaluate(() => {
+    return Array.from(document.querySelectorAll("h2")).some(
+      (h) =>
+        h.innerText?.includes("We Detected An Unusual Login Attempt") ||
+        h.textContent?.includes(
+          "We have detected a suspicious login attempt",
+        ) ||
+        h.textContent?.includes("suspicious login"),
+    );
+  });
+
+  if (!hasChallenge) return false;
+
+  log("⚠️ Login challenge dialog detected — clicking Close...");
+
+  const clicked = await page.evaluate(() => {
+    const buttons = Array.from(document.querySelectorAll('div[role="button"]'));
+    const closeBtn = buttons.find(
+      (btn) => btn.innerText?.trim().toLowerCase() === "close",
+    );
+    if (closeBtn) {
+      closeBtn.click();
+      return true;
+    }
+    return false;
+  });
+
+  if (!clicked) {
+    log("❌ Could not find Close button on challenge dialog");
+    return false;
+  }
+
+  log("✓ Clicked Close — navigating to homepage...");
+  await sleep(10000);
+
+  await gotoIG(page, "https://www.instagram.com/");
+  await sleep(cfg.delayPageLoad || 3000);
+
+  log("🔄 Navigating to 2FA settings...");
+  await gotoAccountsCenter(page, TWO_FA_URL);
+  await sleep(cfg.delayAfterClick || 2000);
+
+  return true;
+}
+
+// ============================================================================
+// ADD HOTMAIL
 // ============================================================================
 
 async function addHotmailToAccount(page, account, hotmailData) {
@@ -895,7 +1013,7 @@ async function addHotmailToAccount(page, account, hotmailData) {
             checkbox.click();
             return true;
           }
-          return true; // already checked
+          return true;
         }
       }
       return false;
@@ -928,14 +1046,13 @@ async function addHotmailToAccount(page, account, hotmailData) {
 
   await sleep(cfg.delayPageLoad || 3000);
 
-  // GMX email verification nếu cần
   await handleEmailVerificationIfNeeded(page, account);
 
   log("Waiting for confirmation code dialog...");
   await waitForText(page, "Enter your confirmation code", 10000);
   await sleep(cfg.delayMedium || 2000);
 
-  const maxCodeRetries = cfg.hotmailCodeRetries || 3;
+  const maxCodeRetries = cfg.hotmailCodeRetries || 5;
   let codeVerified = false;
 
   for (let attempt = 1; attempt <= maxCodeRetries; attempt++) {
@@ -947,23 +1064,20 @@ async function addHotmailToAccount(page, account, hotmailData) {
     );
     log(`✓ Code: ${verificationCode}`);
 
-    // Clear input nếu retry
-    if (attempt > 1) {
-      await page.evaluate(
-        ({ selectors }) => {
-          for (const sel of selectors) {
-            const inp = document.querySelector(sel);
-            if (inp) {
-              inp.value = "";
-              inp.dispatchEvent(new Event("input", { bubbles: true }));
-              break;
-            }
+    await page.evaluate(
+      ({ selectors }) => {
+        for (const sel of selectors) {
+          const inp = document.querySelector(sel);
+          if (inp) {
+            inp.value = "";
+            inp.dispatchEvent(new Event("input", { bubbles: true }));
+            break;
           }
-        },
-        { selectors: SELECTORS.HOTMAIL.CODE_INPUT },
-      );
-      await sleep(500);
-    }
+        }
+      },
+      { selectors: SELECTORS.HOTMAIL.CODE_INPUT },
+    );
+    await sleep(500);
 
     const codeInputSuccess = await tryInputSelectors(
       page,
@@ -996,22 +1110,24 @@ async function addHotmailToAccount(page, account, hotmailData) {
 
     await sleep(cfg.delayPageLoad || 3000);
 
+    // Chỉ check wrong code để retry — success check do waitForFunction bên dưới xử lý
     const hasWrongCode = await page.evaluate(() => {
       const spans = Array.from(document.querySelectorAll("span"));
       return spans.some(
-        (s) =>
-          s.textContent.includes("Wrong code") ||
-          s.textContent.includes("That code didn't work"),
+        (span) =>
+          span.textContent.includes("Wrong code") ||
+          span.textContent.includes("That code didn't work"),
       );
     });
 
     if (hasWrongCode) {
-      log(`❌ Wrong code, retrying...`);
+      log(`❌ Wrong code on attempt ${attempt}, retrying...`);
       await sleep(cfg.delayMedium || 2000);
       continue;
     }
 
-    log("✅ Code accepted!");
+    // Không có lỗi → code được chấp nhận
+    log(`✅ Code accepted on attempt ${attempt}!`);
     codeVerified = true;
     break;
   }
@@ -1021,56 +1137,46 @@ async function addHotmailToAccount(page, account, hotmailData) {
       `Failed to verify hotmail code after ${maxCodeRetries} attempts`,
     );
 
-  log("Checking success...");
+  // Final success check — waitForFunction 60s giống code gốc, sạch hơn
+  log("Checking for success message...");
   try {
     await page.waitForFunction(
-      ({ successText }) => {
-        const spans = Array.from(document.querySelectorAll("span"));
-        return spans.some((span) => {
-          const t = span.textContent.trim();
-          return (
-            t.includes(successText) ||
-            t.includes("You've added your email") ||
-            t.includes("You have added your email") ||
-            t.includes("added your email to the accounts")
-          );
-        });
+      () => {
+        const body = document.body.innerText;
+        return (
+          body.includes("You have added your email address to the selected accounts") ||
+          body.includes("You've added your email") ||
+          body.includes("You have added your email") ||
+          body.includes("added your email to the accounts")
+        );
       },
-      { successText: SELECTORS.HOTMAIL.SUCCESS_TEXT },
-      { timeout: 60000 },
+      { timeout: 60000, polling: 2000 },
     );
     log("✅ Hotmail added successfully!");
   } catch (_) {
-    // Fallback check
-    const hasOtherSign = await page.evaluate(
-      ({ successText }) => {
-        const spans = Array.from(document.querySelectorAll("span"));
-        const hasText = spans.some((s) => {
-          const t = s.textContent.trim().toLowerCase();
-          return (
-            t.includes(successText.toLowerCase()) ||
-            t.includes("you've added") ||
-            t.includes("you have added") ||
-            t.includes("added your email")
-          );
-        });
-        if (hasText) return true;
-        const nextButtons = Array.from(
-          document.querySelectorAll('div[role="button"]'),
-        ).filter((btn) => {
+    log("⚠️ Timeout — checking fallback indicators...");
+
+    // Fallback: nút Next biến mất = quá trình hoàn tất
+    const hasOtherSuccessSign = await page.evaluate(() => {
+      const body = document.body.innerText.toLowerCase();
+      if (
+        body.includes("you've added") ||
+        body.includes("you have added") ||
+        body.includes("added your email")
+      ) return true;
+
+      const nextButtons = Array.from(document.querySelectorAll('div[role="button"]'))
+        .filter((btn) => {
           const span = btn.querySelector("span");
           return span && span.textContent.trim() === "Next";
         });
-        return nextButtons.length === 0;
-      },
-      { successText: SELECTORS.HOTMAIL.SUCCESS_TEXT },
-    );
+      return nextButtons.length === 0;
+    });
 
-    if (hasOtherSign) {
-      log("✅ Success indicators detected (fallback)");
-    } else {
-      log("⚠️ No clear success indicator, continuing...");
+    if (!hasOtherSuccessSign) {
+      throw new Error("Cannot confirm hotmail was added — no success indicators found");
     }
+    log("✅ Detected success via fallback indicators");
   }
 
   await sleep(cfg.delayMedium || 2000);
@@ -1079,20 +1185,21 @@ async function addHotmailToAccount(page, account, hotmailData) {
   await handlePostSetupDialogs(page, account);
 
   log(`✅ Hotmail ${hotmailData.hotmail} added to ${account.username}`);
-  return true;
+  return hotmailData; // trả về object hotmailData trực tiếp
 }
 
 // ============================================================================
-// ENABLE 2FA — logic từ script gốc, config/selectors từ worker
+// ENABLE 2FA  ← Hàm chính, chỉ gọi writeSuccessAccount / writeNoHotmailAccount TẠI ĐÂY
 // ============================================================================
 
-async function enable2FA(account, page, hotmailList, hotmailIndex, browser) {
+async function enable2FA(account, page, hotmailList, hotmailIndex) {
   const TWO_FA_URL =
     "https://accountscenter.instagram.com/password_and_security/two_factor/";
 
   log(`\n=== Processing: ${account.username} ===`);
 
-  let usedHotmail = null;
+  const assignedHotmail =
+    hotmailIndex < hotmailList.length ? hotmailList[hotmailIndex] : null;
 
   try {
     // ── 1. Import cookies ────────────────────────────────────────────────
@@ -1120,41 +1227,42 @@ async function enable2FA(account, page, hotmailList, hotmailIndex, browser) {
     }
 
     if (currentPath !== expectedPath) {
-      throw new Error(
-        `Cannot access 2FA settings (wrong cookies), URL: ${currentUrl}`,
-      );
+      const debugHeadings = await page.evaluate(() => {
+        return Array.from(document.querySelectorAll("h1, h2, h3")).map(
+          (h) => `[${h.tagName}] "${h.textContent.trim()}"`,
+        );
+      });
+      log(`🔍 DEBUG headings: ${debugHeadings.join(" || ")}`);
+
+      const handled = await handleLoginChallengeDialog(page, TWO_FA_URL);
+
+      if (handled) {
+        const retryUrl = page.url();
+        let retryPath;
+        try {
+          retryPath = new URL(retryUrl).pathname;
+        } catch (_) {
+          retryPath = retryUrl;
+        }
+
+        if (retryPath !== expectedPath) {
+          log(`❌ Still not on 2FA page after retry: ${retryUrl}`);
+          writeFailedAccount(account, `Login challenge retry failed: ${retryUrl}`);
+          removeAccountFromInput(account.username);
+          return { success: false, error: "Login challenge retry failed" };
+        }
+        log("✅ On 2FA page after challenge dismiss — continuing...");
+      } else {
+        writeFailedAccount(account, `Sai cookie - ${currentUrl}`);
+        removeAccountFromInput(account.username);
+        return { success: false, error: "Sai cookie" };
+      }
     }
 
     await sleep(cfg.delayAfterClick || 2000);
 
-    // ── 4. Unusual login ──────────────────────────────────────────────────
-    const hasChallenge = await page.evaluate(() => {
-      return Array.from(document.querySelectorAll("h2")).some((h) =>
-        h.innerText?.includes("We Detected An Unusual Login Attempt"),
-      );
-    });
-
-    if (hasChallenge) {
-      log("⚠️ Unusual login detected");
-      const clicked = await page.evaluate(() => {
-        const buttons = Array.from(
-          document.querySelectorAll('div[role="button"]'),
-        );
-        const closeBtn = buttons.find(
-          (btn) => btn.innerText?.trim().toLowerCase() === "close",
-        );
-        if (closeBtn) {
-          closeBtn.click();
-          return true;
-        }
-        return false;
-      });
-      if (!clicked) throw new Error("Could not close unusual login challenge");
-
-      log("Retrying 2FA settings...");
-      await gotoAccountsCenter(page, TWO_FA_URL);
-      await sleep(cfg.delayAfterClick || 2000);
-    }
+    const challenged = await handleLoginChallengeDialog(page, TWO_FA_URL);
+    if (challenged) log("✅ Challenge dismissed — back on 2FA page");
 
     await sleep(cfg.delayPageLoad || 3000);
 
@@ -1167,21 +1275,15 @@ async function enable2FA(account, page, hotmailList, hotmailIndex, browser) {
       ({ username, selector }) => {
         const divs = Array.from(document.querySelectorAll(selector));
         const targetDiv = divs.find((d) => d.textContent.trim() === username);
-
         if (targetDiv) {
           let clickableParent = targetDiv.closest(
             'a, button, [role="button"], [onclick]',
           );
-
-          if (!clickableParent) {
+          if (!clickableParent)
             clickableParent = targetDiv.closest(".x9f619.x1ja2u2z.x78zum5");
-          }
-
-          if (clickableParent) {
-            clickableParent.click();
-          } else {
+          if (clickableParent) clickableParent.click();
+          else
             targetDiv.parentElement.parentElement.parentElement.parentElement.parentElement.click();
-          }
         }
       },
       { username: account.username, selector: SELECTORS.TWO_FA.USERNAME_DIV },
@@ -1193,7 +1295,6 @@ async function enable2FA(account, page, hotmailList, hotmailIndex, browser) {
     const emailMismatch = await page.evaluate(
       ({ expectedEmail, cannotChangeText }) => {
         const spans = Array.from(document.querySelectorAll("span"));
-
         const whatsappSpan = spans.find((s) => {
           const t = s.textContent.toLowerCase();
           return (
@@ -1205,7 +1306,7 @@ async function enable2FA(account, page, hotmailList, hotmailIndex, browser) {
             mismatch: true,
             type: "whatsapp_verification",
             displayed: "WhatsApp",
-            reason: "Code sent to WhatsApp instead of email",
+            reason: "Code sent to WhatsApp",
           };
 
         const cantChangeSpan = spans.find((s) => {
@@ -1221,7 +1322,7 @@ async function enable2FA(account, page, hotmailList, hotmailIndex, browser) {
             mismatch: true,
             type: "cannot_make_change",
             displayed: "Cannot make this change",
-            reason: "Instagram doesn't allow changes at this moment",
+            reason: "Instagram doesn't allow changes",
           };
 
         const codeSpan = spans.find((s) => {
@@ -1239,14 +1340,13 @@ async function enable2FA(account, page, hotmailList, hotmailIndex, browser) {
 
         if (emailMatch) {
           const displayedEmail = emailMatch[0];
-          if (/^[A-Z]/.test(displayedEmail)) {
+          if (/^[A-Z]/.test(displayedEmail))
             return {
               mismatch: true,
               type: "uppercase_first_letter",
               displayed: displayedEmail,
-              reason: "Email starts with uppercase letter",
+              reason: "Email starts with uppercase",
             };
-          }
           const displayedDomain = displayedEmail.split("@")[1]?.toLowerCase();
           const expectedDomain = expectedEmail.split("@")[1]?.toLowerCase();
           const gmxDomains = ["gmx.de", "gmx.net"];
@@ -1261,7 +1361,7 @@ async function enable2FA(account, page, hotmailList, hotmailIndex, browser) {
             ["net", "de"].includes(displayedTLD)
           )
             return { mismatch: false };
-          if (expectedTLD && displayedTLD && displayedTLD !== expectedTLD) {
+          if (expectedTLD && displayedTLD && displayedTLD !== expectedTLD)
             return {
               mismatch: true,
               type: "domain_mismatch",
@@ -1269,18 +1369,15 @@ async function enable2FA(account, page, hotmailList, hotmailIndex, browser) {
               expected: expectedEmail,
               reason: `Domain mismatch: *.${displayedTLD} vs *.${expectedTLD}`,
             };
-          }
         }
 
-        if (phoneMatch && !emailMatch) {
+        if (phoneMatch && !emailMatch)
           return {
             mismatch: true,
             type: "phone_number",
             displayed: phoneMatch[0],
-            reason: "Code sent to phone number instead of email",
+            reason: "Code sent to phone",
           };
-        }
-
         return { mismatch: false };
       },
       {
@@ -1291,29 +1388,12 @@ async function enable2FA(account, page, hotmailList, hotmailIndex, browser) {
 
     if (emailMismatch.mismatch) {
       log(`⚠️ Mismatch: ${emailMismatch.type} — ${emailMismatch.reason}`);
-      if (emailMismatch.displayed)
-        log(`   Displayed: ${emailMismatch.displayed}`);
-      if (emailMismatch.expected)
-        log(`   Expected:  ${emailMismatch.expected}`);
-      await safeScreenshot(
-        page,
-        path.join(
-          SCREENSHOT_DIR,
-          `${account.username}_${emailMismatch.type}.png`,
-        ),
-      );
       writeFailedAccount(
         account,
         `${emailMismatch.type}: ${emailMismatch.displayed} - ${emailMismatch.reason}`,
       );
       removeAccountFromInput(account.username);
-      return {
-        success: false,
-        username: account.username,
-        twoFA: "",
-        hotmailData: null,
-        error: `${emailMismatch.type}: ${emailMismatch.displayed}`,
-      };
+      return { success: false, error: `${emailMismatch.type}: ${emailMismatch.displayed}` };
     }
 
     // ── 7. Email verification ─────────────────────────────────────────────
@@ -1321,23 +1401,15 @@ async function enable2FA(account, page, hotmailList, hotmailIndex, browser) {
 
     // ── 8. Check 2FA already on ───────────────────────────────────────────
     const twoFAIsOn = await page.evaluate(() => {
-      const spans = Array.from(document.querySelectorAll("span"));
-      return spans.some(
+      return Array.from(document.querySelectorAll("span")).some(
         (s) => s.textContent.trim() === "Two-factor authentication is on",
       );
     });
-
     if (twoFAIsOn) {
-      log("⚠️ 2FA already enabled for this account!");
+      log("⚠️ 2FA already enabled!");
       writeFailedAccount(account, "2FA already enabled");
       removeAccountFromInput(account.username);
-      return {
-        success: false,
-        username: account.username,
-        twoFA: "",
-        hotmailData: null,
-        error: "2FA already enabled",
-      };
+      return { success: false, error: "2FA already enabled" };
     }
 
     // ── 9. Select Duo Mobile ──────────────────────────────────────────────
@@ -1360,14 +1432,11 @@ async function enable2FA(account, page, hotmailList, hotmailIndex, browser) {
 
     await sleep(cfg.delayAfterClick || 2000);
 
-    // Click Continue
     await page.evaluate(
       ({ continueText }) => {
         const spans = Array.from(document.querySelectorAll("span"));
-        const continueBtn = spans.find(
-          (s) => s.textContent.trim() === continueText,
-        );
-        if (continueBtn) continueBtn.closest('div[role="none"]').click();
+        const btn = spans.find((s) => s.textContent.trim() === continueText);
+        if (btn) btn.closest('div[role="none"]').click();
       },
       { continueText: SELECTORS.TWO_FA.CONTINUE_TEXT },
     );
@@ -1391,16 +1460,9 @@ async function enable2FA(account, page, hotmailList, hotmailIndex, browser) {
       { secretSpan: SELECTORS.TWO_FA.SECRET_SPAN },
     );
 
-    if (!twoFASecret) {
-      await safeScreenshot(
-        page,
-        path.join(SCREENSHOT_DIR, `${account.username}_no_secret.png`),
-      );
-      throw new Error("Could not find 2FA Secret");
-    }
+    if (!twoFASecret) throw new Error("Could not find 2FA Secret");
     log(`✓ Secret: ${twoFASecret}`);
 
-    // Click Next
     await page.evaluate(
       ({ nextText }) => {
         const buttons = Array.from(
@@ -1432,7 +1494,6 @@ async function enable2FA(account, page, hotmailList, hotmailIndex, browser) {
 
     await sleep(cfg.delayAfterClick || 2000);
 
-    // Click Next visible cuối
     await page.evaluate(
       ({ nextText }) => {
         const buttons = Array.from(
@@ -1457,7 +1518,6 @@ async function enable2FA(account, page, hotmailList, hotmailIndex, browser) {
 
     await sleep(2000);
 
-    // Click Next lần 2
     await page.evaluate(
       ({ nextText }) => {
         const buttons = Array.from(
@@ -1474,45 +1534,70 @@ async function enable2FA(account, page, hotmailList, hotmailIndex, browser) {
     log(`✓ 2FA submitted for ${account.username}!`);
     await sleep(10000);
 
-    // ── 12. Homepage & post-setup dialogs ────────────────────────────────
     await gotoIG(page, "https://www.instagram.com/");
     await sleep(cfg.delayPageLoad || 3000);
 
-    // ── 13. Add Hotmail ───────────────────────────────────────────────────
+    // ── 12. Add Hotmail ───────────────────────────────────────────────────
     log("\n🔄 === STARTING HOTMAIL ADDITION PROCESS ===");
 
-    if (hotmailIndex < hotmailList.length) {
-      usedHotmail = hotmailList[hotmailIndex];
-      log(`📧 Using hotmail #${hotmailIndex + 1}: ${usedHotmail.hotmail}`);
+    if (assignedHotmail) {
+      log(`📧 Using hotmail: ${assignedHotmail.hotmail}`);
+      let hotmailSucceeded = false;
+      let hotmailError = "";
 
       try {
-        await addHotmailToAccount(page, account, usedHotmail);
-        log("✅ Hotmail added successfully!");
-        removeHotmailFromFile(usedHotmail.hotmail);
+        const addedHotmailData = await addHotmailToAccount(
+          page,
+          account,
+          assignedHotmail,
+        );
+
+        // addHotmailToAccount trả về hotmailData object khi thành công
+        log(`✅ Hotmail add OK: ${addedHotmailData.hotmail}`);
+        hotmailSucceeded = true;
+
+        // Xóa hotmail khỏi file (chỉ sau khi add thành công)
+        await sleep(500);
+        removeHotmailFromFile(assignedHotmail.hotmail);
+
+        // ✅ Lưu vào success.txt với đầy đủ hotmail info
+        writeSuccessAccount(account, twoFASecret, addedHotmailData);
+
       } catch (hotmailErr) {
-        log(`❌ Hotmail failed: ${hotmailErr.message}`);
-        usedHotmail = null;
+        hotmailError = hotmailErr.message;
+        log(`❌ Hotmail add failed: ${hotmailError}`);
+
+        // ⚠️ Lưu vào no_hotmail.txt — đã bật 2FA nhưng chưa add được hotmail
+        writeNoHotmailAccount(account, twoFASecret, hotmailError);
       }
+
+      removeAccountFromInput(account.username);
+
+      return {
+        success: true,
+        hotmailSuccess: hotmailSucceeded,
+        username: account.username,
+        twoFA: twoFASecret,
+        hotmailData: hotmailSucceeded ? assignedHotmail : null,
+      };
+
     } else {
-      log("⚠️ No more hotmail addresses available in list");
+      // Không có hotmail nào trong danh sách
+      log("⚠️ No hotmail available — saving to no_hotmail.txt");
+      writeNoHotmailAccount(account, twoFASecret, "no_hotmail_available");
+      removeAccountFromInput(account.username);
+
+      return {
+        success: true,
+        hotmailSuccess: false,
+        username: account.username,
+        twoFA: twoFASecret,
+        hotmailData: null,
+      };
     }
 
-    await handlePostSetupDialogs(page, account);
-    removeAccountFromInput(account.username);
-
-    return {
-      success: true,
-      username: account.username,
-      twoFA: twoFASecret,
-      hotmailData: usedHotmail,
-      cookies: account.cookies,
-    };
   } catch (error) {
-    log(`✗ Error processing ${account.username}: ${error.message}`);
-    await safeScreenshot(
-      page,
-      path.join(SCREENSHOT_DIR, `${account.username}_error.png`),
-    );
+    log(`✗ Error in enable2FA: ${error.message}`);
     writeFailedAccount(account, error.message);
     removeAccountFromInput(account.username);
 
@@ -1526,98 +1611,9 @@ async function enable2FA(account, page, hotmailList, hotmailIndex, browser) {
   }
 }
 
-async function checkCurrentIP(page) {
-  try {
-    await page.goto("https://api.ipify.org?format=json", {
-      waitUntil: "networkidle0",
-      timeout: 10000,
-    });
-
-    const ip = await page.evaluate(() => {
-      return JSON.parse(document.body.textContent).ip;
-    });
-
-    console.log(`🌐 Current IP: ${ip}`);
-    return ip;
-  } catch (error) {
-    console.error("⚠️ Cannot retrieve IP:", error.message);
-    return null;
-  }
-}
-
-async function checkBrowserLocation() {
-  const result = {
-    geolocation: null,
-    ipLocation: null,
-    mismatch: false,
-    error: null,
-  };
-
-  // 1️⃣ Lấy location từ Geolocation API
-  try {
-    result.geolocation = await new Promise((resolve, reject) => {
-      if (!navigator.geolocation) {
-        return reject("Geolocation not supported");
-      }
-
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          resolve({
-            latitude: pos.coords.latitude,
-            longitude: pos.coords.longitude,
-            accuracy: pos.coords.faccuracy,
-          });
-        },
-        (err) => reject(err.message),
-        {
-          enableHighAccuracy: true,
-          timeout: 10000,
-        },
-      );
-    });
-  } catch (e) {
-    result.error = "Geolocation error: " + e;
-  }
-
-  // 2️⃣ Lấy location theo IP
-  try {
-    const res = await fetch("https://ipinfo.io/json");
-    const data = await res.json();
-
-    if (data.loc) {
-      const [lat, lon] = data.loc.split(",");
-      result.ipLocation = {
-        latitude: Number(lat),
-        longitude: Number(lon),
-        city: data.city,
-        country: data.country,
-        ip: data.ip,
-      };
-    }
-  } catch (e) {
-    result.error = "IP location error: " + e;
-  }
-
-  // 3️⃣ So sánh lệch location
-  if (result.geolocation && result.ipLocation) {
-    const latDiff = Math.abs(
-      result.geolocation.latitude - result.ipLocation.latitude,
-    );
-    const lonDiff = Math.abs(
-      result.geolocation.longitude - result.ipLocation.longitude,
-    );
-
-    // Lệch ~ >100km (1 độ ≈ 111km)
-    if (latDiff > 1 || lonDiff > 1) {
-      result.mismatch = true;
-    }
-  }
-
-  return result;
-}
-
 // ============================================================================
-// MAIN LOOP
+// MAIN LOOP  ← KHÔNG gọi writeSuccessAccount/writeFailedAccount ở đây nữa
+//              vì enable2FA đã xử lý toàn bộ việc ghi file
 // ============================================================================
 
 async function main() {
@@ -1629,6 +1625,11 @@ async function main() {
   [DATA_DIR, SCREENSHOT_DIR].forEach((d) => {
     if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
   });
+
+  // Đảm bảo no_hotmail.txt tồn tại
+  if (!fs.existsSync(NO_HOTMAIL_FILE)) {
+    fs.writeFileSync(NO_HOTMAIL_FILE, "", "utf-8");
+  }
 
   let accounts;
   try {
@@ -1698,51 +1699,34 @@ async function main() {
       log("✓ Browser launched");
     }
 
-    if (!currentPage) {
-      currentPage = await newPage(browser);
-    }
-
-    const hotmailData = i < hotmailList.length ? hotmailList[i] : null;
-    if (hotmailData) log(`📧 Hotmail: ${hotmailData.hotmail}`);
+    if (!currentPage) currentPage = await newPage(browser);
 
     const startTime = Date.now();
     let result;
 
     try {
-      const currentIP = await checkCurrentIP(currentPage);
-      checkBrowserLocation().then((res) => {
-        console.log("📍 Browser Geolocation:", res.geolocation);
-        console.log("🌐 IP Location:", res.ipLocation);
-        console.log("⚠️ Location mismatch:", res.mismatch);
-      });
-      result = await enable2FA(account, currentPage, hotmailList, i, browser);
+      // Truyền hotmailList theo index i
+      // NOTE: hotmailList được đọc 1 lần lúc đầu.
+      // Sau mỗi account, nếu hotmail bị dùng, nó đã bị xóa khỏi file
+      // nhưng hotmailList trong memory vẫn còn — dùng index i để assign 1-1
+      result = await enable2FA(account, currentPage, hotmailList, i);
     } catch (e) {
-      log(`✗ ${e.message}`);
-      await safeScreenshot(
-        currentPage,
-        path.join(SCREENSHOT_DIR, `${account.username}_error.png`),
-      );
+      log(`✗ Unexpected error: ${e.message}`);
       result = { success: false, error: e.message };
     }
 
     log(`⏱️ Done in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
 
     if (result.success) {
-      writeSuccessAccount(account, result.twoFA, result.hotmailData);
-      const hm = result.hotmailData
-        ? ` + hotmail: ${result.hotmailData.hotmail}`
-        : " (no hotmail)";
-      log(`✅ SUCCESS: ${account.username}${hm}`);
-    } else {
-      if (result.error && !result.username) {
-        writeFailedAccount(account, result.error);
+      if (result.hotmailSuccess) {
+        log(`✅ SUCCESS: ${account.username} + hotmail: ${result.hotmailData?.hotmail}`);
+      } else {
+        log(`✅ SUCCESS (2FA only, no hotmail): ${account.username}`);
       }
+    } else {
       log(`✗ FAILED: ${account.username} — ${result.error || "unknown"}`);
     }
 
-    if (!result.username) {
-      removeAccountFromInput(account.username);
-    }
     await safeClosePage(currentPage);
     currentPage = null;
 
