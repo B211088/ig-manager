@@ -603,7 +603,7 @@ function writeSuccessAccount(account, twoFA, hotmailData) {
 }
 
 function writeFailedAccount(account, reason) {
-  const line = `${account.username}|${account.password}|${account.igEmail}|${account.gmxPassword}|${account.yopMail}|${account.posts}|${account.followers}|${account.following}|${account.cookies}|${reason}\n`;
+  const line = `${account.username}|${account.password}|${account.igEmail}|${account.gmxMail}|${account.gmxPassword}|${account.posts}|${account.followers}|${account.following}|${account.cookies}|${reason}\n`;
   fs.appendFileSync(FAILED_FILE, line, "utf-8");
   log(`📝 Failed: ${account.username} — ${reason}`);
 }

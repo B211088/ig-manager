@@ -425,6 +425,62 @@ class IGManagerUI {
     this.widgets.threadList.focus();
   }
 
+  // ── CONFIRM DIALOG ────────────────────────────────────────────────────────
+  showConfirm(message, color, onConfirm) {
+    const s = this.screen;
+
+    const dialog = blessed.box({
+      parent: s,
+      top: "center",
+      left: "center",
+      width: 56,
+      height: 7,
+      border: { type: "line" },
+      tags: true,
+      keys: true,
+      style: { border: { fg: color || "yellow" }, bg: "black" },
+      label: " {bold}{yellow-fg}⚠ XÁC NHẬN{/} ",
+    });
+
+    blessed.text({
+      parent: dialog,
+      top: 1,
+      left: 2,
+      width: "100%-4",
+      content: message,
+      tags: true,
+      style: { bg: "black", fg: "white" },
+    });
+
+    blessed.text({
+      parent: dialog,
+      top: 3,
+      left: 2,
+      width: "100%-4",
+      content: " {black-fg}{green-bg} Enter {/} {green-fg}Xác nhận{/}    {black-fg}{red-bg} Esc {/} {red-fg}Hủy bỏ{/}",
+      tags: true,
+      style: { bg: "black" },
+    });
+
+    const closeDialog = () => {
+      dialog.destroy();
+      this.widgets.threadList.focus();
+      s.render();
+    };
+
+    dialog.key(["enter"], () => {
+      closeDialog();
+      onConfirm();
+    });
+
+    dialog.key(["escape", "q"], () => {
+      closeDialog();
+    });
+
+    dialog.focus();
+    s.render();
+  }
+
   buildHelpOverlay() {
     const s = this.screen;
 
@@ -671,43 +727,46 @@ class IGManagerUI {
 
   addThread() {
     const num = this.config.threads.length + 1;
-    const id = Date.now();
-    const newThread = createDefaultThread(num);
-    newThread.id = id;
-    newThread.name = `Thread ${num}`;
-    newThread.dataDir = path.join(__dirname, "data", `thread${num}`);
-    this.config.threads.push(newThread);
-    ensureDataDir(newThread.dataDir);
-    saveConfig(this.config);
-    this.logs.set(id, []);
-    this.addLog(
-      null,
-      `{green-fg}✓ New thread: ${newThread.name} — ${newThread.dataDir}{/}`
+    this.showConfirm(
+      `{cyan-fg}Tạo mới Thread ${num}?{/}`,
+      "cyan",
+      () => {
+        const id = Date.now();
+        const newThread = createDefaultThread(num);
+        newThread.id = id;
+        newThread.name = `Thread ${num}`;
+        newThread.dataDir = path.join(__dirname, "data", `thread${num}`);
+        this.config.threads.push(newThread);
+        ensureDataDir(newThread.dataDir);
+        saveConfig(this.config);
+        this.logs.set(id, []);
+        this.addLog(null, `{green-fg}✓ New thread: ${newThread.name} — ${newThread.dataDir}{/}`);
+        this.addLog(null, `{gray-fg}  Created: input.txt, hotmail.txt, success.txt, failed.txt{/}`);
+        this.render();
+      }
     );
-    this.addLog(
-      null,
-      `{gray-fg}  Created: input.txt, hotmail.txt, success.txt, failed.txt{/}`
-    );
-    this.render();
   }
 
   deleteThread() {
     const thread = this.config.threads[this.selectedThread];
     if (!thread) return;
     if (this.runningProcesses.has(thread.id)) {
-      this.addLog(
-        null,
-        `{red-fg}✗ Cannot delete running thread: ${thread.name}{/}`
-      );
+      this.addLog(null, `{red-fg}✗ Không thể xóa thread đang chạy: ${thread.name}{/}`);
       return;
     }
-    this.config.threads.splice(this.selectedThread, 1);
-    saveConfig(this.config);
-    this.addLog(null, `{yellow-fg}⚠ Deleted thread: ${thread.name}{/}`);
-    if (this.selectedThread >= this.config.threads.length) {
-      this.selectedThread = Math.max(0, this.config.threads.length - 1);
-    }
-    this.render();
+    this.showConfirm(
+      `{red-fg}Xóa "${thread.name}"? Hành động không thể hoàn tác!{/}`,
+      "red",
+      () => {
+        this.config.threads.splice(this.selectedThread, 1);
+        saveConfig(this.config);
+        this.addLog(null, `{yellow-fg}⚠ Đã xóa thread: ${thread.name}{/}`);
+        if (this.selectedThread >= this.config.threads.length) {
+          this.selectedThread = Math.max(0, this.config.threads.length - 1);
+        }
+        this.render();
+      }
+    );
   }
 
   startThread(threadOverride) {
@@ -802,13 +861,25 @@ class IGManagerUI {
     if (!thread) return;
     const child = this.runningProcesses.get(thread.id);
     if (!child) {
-      this.addLog(thread.id, `{yellow-fg}⚠ Thread not running{/}`);
+      this.addLog(thread.id, `{yellow-fg}⚠ Thread không đang chạy{/}`);
       return;
     }
-    child.kill("SIGTERM");
-    this.runningProcesses.delete(thread.id);
-    this.addLog(thread.id, `{yellow-fg}■ Stopped ${thread.name}{/}`);
-    this.render();
+    // Nếu gọi trực tiếp từ phím (không có threadOverride) thì hỏi xác nhận
+    const doStop = () => {
+      child.kill("SIGTERM");
+      this.runningProcesses.delete(thread.id);
+      this.addLog(thread.id, `{yellow-fg}■ Đã dừng ${thread.name}{/}`);
+      this.render();
+    };
+    if (!threadOverride) {
+      this.showConfirm(
+        `{yellow-fg}Dừng "${thread.name}" đang chạy?{/}`,
+        "yellow",
+        doStop
+      );
+    } else {
+      doStop();
+    }
   }
 
   startAllThreads() {

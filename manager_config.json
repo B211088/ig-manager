@@ -18,7 +18,7 @@
       "gmxMaxRetries": 10,
       "gmxRetryDelay": 5000,
       "twoFaApiUrl": "https://2fa.live/tok",
-      "headless": false,
+      "headless": true,
       "browserTimeout": 30000,
       "windowSize": "990,830",
       "windowPosition": "0,0",
@@ -50,7 +50,7 @@
       "gmxMaxRetries": 10,
       "gmxRetryDelay": 5000,
       "twoFaApiUrl": "https://2fa.live/tok",
-      "headless": true,
+      "headless": false,
       "browserTimeout": 30000,
       "windowSize": "990,830",
       "windowPosition": "0,0",
@@ -99,7 +99,7 @@
       "hotmailMaxRetries": 10
     },
     {
-      "id": 1772391841826,
+      "id": 1772416718642,
       "name": "Thread 4",
       "enabled": true,
       "dataDir": "C:\\Users\\ADMIN\\Downloads\\ig-manager (1)\\ig-manager\\data\\thread4",

@@ -14,7 +14,7 @@
   "gmxMaxRetries": 10,
   "gmxRetryDelay": 5000,
   "twoFaApiUrl": "https://2fa.live/tok",
-  "headless": false,
+  "headless": true,
   "browserTimeout": 30000,
   "windowSize": "990,830",
   "windowPosition": "0,0",
