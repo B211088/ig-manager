@@ -1612,8 +1612,83 @@ async function enable2FA(account, page, hotmailList, hotmailIndex) {
 }
 
 // ============================================================================
-// MAIN LOOP  ← KHÔNG gọi writeSuccessAccount/writeFailedAccount ở đây nữa
-//              vì enable2FA đã xử lý toàn bộ việc ghi file
+// CHECK IP _ LOCATION
+// ============================================================================
+
+
+async function checkBrowserLocation() {
+  const result = {
+    geolocation: null,
+    ipLocation: null,
+    mismatch: false,
+    error: null,
+  };
+
+  // 1️⃣ Lấy location từ Geolocation API
+  try {
+    result.geolocation = await new Promise((resolve, reject) => {
+      if (!navigator.geolocation) {
+        return reject("Geolocation not supported");
+      }
+
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          resolve({
+            latitude: pos.coords.latitude,
+            longitude: pos.coords.longitude,
+            accuracy: pos.coords.faccuracy,
+          });
+        },
+        (err) => reject(err.message),
+        {
+          enableHighAccuracy: true,
+          timeout: 10000,
+        },
+      );
+    });
+  } catch (e) {
+    result.error = "Geolocation error: " + e;
+  }
+
+  // 2️⃣ Lấy location theo IP
+  try {
+    const res = await fetch("https://ipinfo.io/json");
+    const data = await res.json();
+
+    if (data.loc) {
+      const [lat, lon] = data.loc.split(",");
+      result.ipLocation = {
+        latitude: Number(lat),
+        longitude: Number(lon),
+        city: data.city,
+        country: data.country,
+        ip: data.ip,
+      };
+    }
+  } catch (e) {
+    result.error = "IP location error: " + e;
+  }
+
+  // 3️⃣ So sánh lệch location
+  if (result.geolocation && result.ipLocation) {
+    const latDiff = Math.abs(
+      result.geolocation.latitude - result.ipLocation.latitude,
+    );
+    const lonDiff = Math.abs(
+      result.geolocation.longitude - result.ipLocation.longitude,
+    );
+
+    // Lệch ~ >100km (1 độ ≈ 111km)
+    if (latDiff > 1 || lonDiff > 1) {
+      result.mismatch = true;
+    }
+  }
+
+  return result;
+}
+
+// ============================================================================
+// MAIN LOOP  
 // ============================================================================
 
 async function main() {
@@ -1705,10 +1780,11 @@ async function main() {
     let result;
 
     try {
-      // Truyền hotmailList theo index i
-      // NOTE: hotmailList được đọc 1 lần lúc đầu.
-      // Sau mỗi account, nếu hotmail bị dùng, nó đã bị xóa khỏi file
-      // nhưng hotmailList trong memory vẫn còn — dùng index i để assign 1-1
+        checkBrowserLocation().then((res) => {
+        console.log("📍 Browser Geolocation:", res.geolocation);
+        console.log("🌐 IP Location:", res.ipLocation);
+        console.log("⚠️ Location mismatch:", res.mismatch);
+      });
       result = await enable2FA(account, currentPage, hotmailList, i);
     } catch (e) {
       log(`✗ Unexpected error: ${e.message}`);
