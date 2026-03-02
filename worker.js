@@ -496,13 +496,16 @@ async function getHotmailVerificationCode(page, hotmailData) {
       log(`🔍 Hotmail attempt ${attempt}/${maxRetries}`);
       try {
         await mailPage.waitForSelector("#list_email", { timeout: 10000 });
-        await mailPage.evaluate(({ text }) => {
-          const input = document.querySelector("#list_email");
-          if (!input) return;
-          input.value = text;
-          input.dispatchEvent(new Event("input", { bubbles: true }));
-          input.dispatchEvent(new Event("change", { bubbles: true }));
-        }, { text: emailLine });
+        await mailPage.evaluate(
+          ({ text }) => {
+            const input = document.querySelector("#list_email");
+            if (!input) return;
+            input.value = text;
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            input.dispatchEvent(new Event("change", { bubbles: true }));
+          },
+          { text: emailLine },
+        );
 
         await mailPage.click(".btn-checked");
         await mailPage.waitForSelector("td.readmail_code span[id]", {
@@ -634,14 +637,17 @@ async function handleEmailVerificationIfNeeded(page, account) {
   console.log("🔍 Checking email verification...");
   await sleep(cfg.delayAfterClick || 2000);
 
-  const checkEmailExists = await page.evaluate(({ checkText }) => {
-    const spans = Array.from(document.querySelectorAll("span"));
-    return spans.some(
-      (span) =>
-        span.textContent.trim() === checkText &&
-        span.className.includes("x1ill7wo"),
-    );
-  }, { checkText: SELECTORS.EMAIL_VERIFICATION.CHECK_EMAIL_TEXT });
+  const checkEmailExists = await page.evaluate(
+    ({ checkText }) => {
+      const spans = Array.from(document.querySelectorAll("span"));
+      return spans.some(
+        (span) =>
+          span.textContent.trim() === checkText &&
+          span.className.includes("x1ill7wo"),
+      );
+    },
+    { checkText: SELECTORS.EMAIL_VERIFICATION.CHECK_EMAIL_TEXT },
+  );
 
   if (!checkEmailExists) {
     log("✓ No email verification required");
@@ -668,13 +674,16 @@ async function handleEmailVerificationIfNeeded(page, account) {
 
   await sleep(cfg.delayMedium || 2000);
 
-  await page.evaluate(({ continueText }) => {
-    const spans = Array.from(document.querySelectorAll("span"));
-    const continueBtn = spans.find(
-      (s) => s.textContent.trim() === continueText,
-    );
-    if (continueBtn) continueBtn.closest('div[role="none"]').click();
-  }, { continueText: SELECTORS.EMAIL_VERIFICATION.CONTINUE_TEXT });
+  await page.evaluate(
+    ({ continueText }) => {
+      const spans = Array.from(document.querySelectorAll("span"));
+      const continueBtn = spans.find(
+        (s) => s.textContent.trim() === continueText,
+      );
+      if (continueBtn) continueBtn.closest('div[role="none"]').click();
+    },
+    { continueText: SELECTORS.EMAIL_VERIFICATION.CONTINUE_TEXT },
+  );
 
   await sleep(cfg.delayPageLoad || 3000);
   log("✓ Email verification done");
@@ -692,19 +701,22 @@ async function handlePostSetupDialogs(page, account) {
     log("📜 Terms & Conditions");
     await sleep(4000);
 
-    const nextClicked = await page.evaluate(({ nextText }) => {
-      const buttons = Array.from(
-        document.querySelectorAll('div[role="button"]'),
-      );
-      const nextBtn = buttons.find(
-        (btn) => btn.textContent.trim() === nextText,
-      );
-      if (nextBtn) {
-        nextBtn.click();
-        return true;
-      }
-      return false;
-    }, { nextText: SELECTORS.TWO_FA.NEXT_TEXT });
+    const nextClicked = await page.evaluate(
+      ({ nextText }) => {
+        const buttons = Array.from(
+          document.querySelectorAll('div[role="button"]'),
+        );
+        const nextBtn = buttons.find(
+          (btn) => btn.textContent.trim() === nextText,
+        );
+        if (nextBtn) {
+          nextBtn.click();
+          return true;
+        }
+        return false;
+      },
+      { nextText: SELECTORS.TWO_FA.NEXT_TEXT },
+    );
     if (nextClicked) {
       log("✓ Clicked Next");
       await sleep(cfg.delayPageLoad || 3000);
@@ -872,38 +884,46 @@ async function addHotmailToAccount(page, account, hotmailData) {
   await sleep(cfg.delayMedium || 2000);
 
   log("Selecting Instagram account checkbox...");
-  const checkboxClicked = await page.evaluate(({ username }) => {
-    const labels = Array.from(document.querySelectorAll("label"));
-    for (const label of labels) {
-      const usernameDiv = label.querySelector("div.x1qjc9v5.x9f619.x78zum5");
-      if (usernameDiv && usernameDiv.textContent.includes(username)) {
-        const checkbox = label.querySelector('input[type="checkbox"]');
-        if (checkbox && !checkbox.checked) {
-          checkbox.click();
-          return true;
+  const checkboxClicked = await page.evaluate(
+    ({ username }) => {
+      const labels = Array.from(document.querySelectorAll("label"));
+      for (const label of labels) {
+        const usernameDiv = label.querySelector("div.x1qjc9v5.x9f619.x78zum5");
+        if (usernameDiv && usernameDiv.textContent.includes(username)) {
+          const checkbox = label.querySelector('input[type="checkbox"]');
+          if (checkbox && !checkbox.checked) {
+            checkbox.click();
+            return true;
+          }
+          return true; // already checked
         }
-        return true; // already checked
       }
-    }
-    return false;
-  }, { username: account.username });
+      return false;
+    },
+    { username: account.username },
+  );
   if (!checkboxClicked) log("⚠️ Checkbox not found, continuing...");
 
   await sleep(cfg.delayMedium || 2000);
 
   log("Clicking Next...");
-  const nextClicked = await page.evaluate(({ nextText }) => {
-    const buttons = Array.from(document.querySelectorAll('div[role="button"]'));
-    const nextBtn = buttons.find((btn) => {
-      const span = btn.querySelector("span");
-      return span && span.textContent.trim() === nextText;
-    });
-    if (nextBtn) {
-      nextBtn.click();
-      return true;
-    }
-    return false;
-  }, { nextText: SELECTORS.HOTMAIL.NEXT_BUTTON_TEXT });
+  const nextClicked = await page.evaluate(
+    ({ nextText }) => {
+      const buttons = Array.from(
+        document.querySelectorAll('div[role="button"]'),
+      );
+      const nextBtn = buttons.find((btn) => {
+        const span = btn.querySelector("span");
+        return span && span.textContent.trim() === nextText;
+      });
+      if (nextBtn) {
+        nextBtn.click();
+        return true;
+      }
+      return false;
+    },
+    { nextText: SELECTORS.HOTMAIL.NEXT_BUTTON_TEXT },
+  );
   if (!nextClicked) throw new Error("Could not click Next button");
 
   await sleep(cfg.delayPageLoad || 3000);
@@ -929,16 +949,19 @@ async function addHotmailToAccount(page, account, hotmailData) {
 
     // Clear input nếu retry
     if (attempt > 1) {
-      await page.evaluate(({ selectors }) => {
-        for (const sel of selectors) {
-          const inp = document.querySelector(sel);
-          if (inp) {
-            inp.value = "";
-            inp.dispatchEvent(new Event("input", { bubbles: true }));
-            break;
+      await page.evaluate(
+        ({ selectors }) => {
+          for (const sel of selectors) {
+            const inp = document.querySelector(sel);
+            if (inp) {
+              inp.value = "";
+              inp.dispatchEvent(new Event("input", { bubbles: true }));
+              break;
+            }
           }
-        }
-      }, { selectors: SELECTORS.HOTMAIL.CODE_INPUT });
+        },
+        { selectors: SELECTORS.HOTMAIL.CODE_INPUT },
+      );
       await sleep(500);
     }
 
@@ -952,20 +975,23 @@ async function addHotmailToAccount(page, account, hotmailData) {
 
     await sleep(cfg.delayMedium || 2000);
 
-    const finalNextClicked = await page.evaluate(({ nextText }) => {
-      const buttons = Array.from(
-        document.querySelectorAll('div[role="button"]'),
-      );
-      const nextBtns = buttons.filter((btn) => {
-        const span = btn.querySelector("span");
-        return span && span.textContent.trim() === nextText;
-      });
-      if (nextBtns.length > 0) {
-        nextBtns[nextBtns.length - 1].click();
-        return true;
-      }
-      return false;
-    }, { nextText: SELECTORS.HOTMAIL.NEXT_BUTTON_TEXT });
+    const finalNextClicked = await page.evaluate(
+      ({ nextText }) => {
+        const buttons = Array.from(
+          document.querySelectorAll('div[role="button"]'),
+        );
+        const nextBtns = buttons.filter((btn) => {
+          const span = btn.querySelector("span");
+          return span && span.textContent.trim() === nextText;
+        });
+        if (nextBtns.length > 0) {
+          nextBtns[nextBtns.length - 1].click();
+          return true;
+        }
+        return false;
+      },
+      { nextText: SELECTORS.HOTMAIL.NEXT_BUTTON_TEXT },
+    );
     if (!finalNextClicked) throw new Error("Could not click final Next button");
 
     await sleep(cfg.delayPageLoad || 3000);
@@ -1016,26 +1042,29 @@ async function addHotmailToAccount(page, account, hotmailData) {
     log("✅ Hotmail added successfully!");
   } catch (_) {
     // Fallback check
-    const hasOtherSign = await page.evaluate(({ successText }) => {
-      const spans = Array.from(document.querySelectorAll("span"));
-      const hasText = spans.some((s) => {
-        const t = s.textContent.trim().toLowerCase();
-        return (
-          t.includes(successText.toLowerCase()) ||
-          t.includes("you've added") ||
-          t.includes("you have added") ||
-          t.includes("added your email")
-        );
-      });
-      if (hasText) return true;
-      const nextButtons = Array.from(
-        document.querySelectorAll('div[role="button"]'),
-      ).filter((btn) => {
-        const span = btn.querySelector("span");
-        return span && span.textContent.trim() === "Next";
-      });
-      return nextButtons.length === 0;
-    }, { successText: SELECTORS.HOTMAIL.SUCCESS_TEXT });
+    const hasOtherSign = await page.evaluate(
+      ({ successText }) => {
+        const spans = Array.from(document.querySelectorAll("span"));
+        const hasText = spans.some((s) => {
+          const t = s.textContent.trim().toLowerCase();
+          return (
+            t.includes(successText.toLowerCase()) ||
+            t.includes("you've added") ||
+            t.includes("you have added") ||
+            t.includes("added your email")
+          );
+        });
+        if (hasText) return true;
+        const nextButtons = Array.from(
+          document.querySelectorAll('div[role="button"]'),
+        ).filter((btn) => {
+          const span = btn.querySelector("span");
+          return span && span.textContent.trim() === "Next";
+        });
+        return nextButtons.length === 0;
+      },
+      { successText: SELECTORS.HOTMAIL.SUCCESS_TEXT },
+    );
 
     if (hasOtherSign) {
       log("✅ Success indicators detected (fallback)");
@@ -1254,7 +1283,10 @@ async function enable2FA(account, page, hotmailList, hotmailIndex, browser) {
 
         return { mismatch: false };
       },
-      { expectedEmail: account.igEmail, cannotChangeText: SELECTORS.TWO_FA.CANNOT_CHANGE_TEXT },
+      {
+        expectedEmail: account.igEmail,
+        cannotChangeText: SELECTORS.TWO_FA.CANNOT_CHANGE_TEXT,
+      },
     );
 
     if (emailMismatch.mismatch) {
@@ -1313,26 +1345,32 @@ async function enable2FA(account, page, hotmailList, hotmailIndex, browser) {
     await waitForText(page, "Duo Mobile", 10000);
     await sleep(cfg.delayMedium || 2000);
 
-    await page.evaluate(({ authAppDiv }) => {
-      const divs = Array.from(document.querySelectorAll(authAppDiv));
-      const target = divs.find(
-        (d) =>
-          d.textContent.includes("Duo Mobile") &&
-          d.textContent.includes("Recommended"),
-      );
-      if (target) target.click();
-    }, { authAppDiv: SELECTORS.TWO_FA.AUTH_APP_DIV });
+    await page.evaluate(
+      ({ authAppDiv }) => {
+        const divs = Array.from(document.querySelectorAll(authAppDiv));
+        const target = divs.find(
+          (d) =>
+            d.textContent.includes("Duo Mobile") &&
+            d.textContent.includes("Recommended"),
+        );
+        if (target) target.click();
+      },
+      { authAppDiv: SELECTORS.TWO_FA.AUTH_APP_DIV },
+    );
 
     await sleep(cfg.delayAfterClick || 2000);
 
     // Click Continue
-    await page.evaluate(({ continueText }) => {
-      const spans = Array.from(document.querySelectorAll("span"));
-      const continueBtn = spans.find(
-        (s) => s.textContent.trim() === continueText,
-      );
-      if (continueBtn) continueBtn.closest('div[role="none"]').click();
-    }, { continueText: SELECTORS.TWO_FA.CONTINUE_TEXT });
+    await page.evaluate(
+      ({ continueText }) => {
+        const spans = Array.from(document.querySelectorAll("span"));
+        const continueBtn = spans.find(
+          (s) => s.textContent.trim() === continueText,
+        );
+        if (continueBtn) continueBtn.closest('div[role="none"]').click();
+      },
+      { continueText: SELECTORS.TWO_FA.CONTINUE_TEXT },
+    );
 
     await sleep(cfg.delayPageLoad || 3000);
 
@@ -1341,14 +1379,17 @@ async function enable2FA(account, page, hotmailList, hotmailIndex, browser) {
     await waitForText(page, "Set up two-factor authentication", 10000);
     await sleep(cfg.delayMedium || 2000);
 
-    const twoFASecret = await page.evaluate(({ secretSpan }) => {
-      const spans = Array.from(document.querySelectorAll(secretSpan));
-      const secretEl = spans.find((s) =>
-        /^[A-Z2-7\s]+$/.test(s.textContent.trim()),
-      );
-      if (secretEl) return secretEl.textContent.trim().replace(/\s/g, "");
-      return "";
-    }, { secretSpan: SELECTORS.TWO_FA.SECRET_SPAN });
+    const twoFASecret = await page.evaluate(
+      ({ secretSpan }) => {
+        const spans = Array.from(document.querySelectorAll(secretSpan));
+        const secretEl = spans.find((s) =>
+          /^[A-Z2-7\s]+$/.test(s.textContent.trim()),
+        );
+        if (secretEl) return secretEl.textContent.trim().replace(/\s/g, "");
+        return "";
+      },
+      { secretSpan: SELECTORS.TWO_FA.SECRET_SPAN },
+    );
 
     if (!twoFASecret) {
       await safeScreenshot(
@@ -1360,11 +1401,18 @@ async function enable2FA(account, page, hotmailList, hotmailIndex, browser) {
     log(`✓ Secret: ${twoFASecret}`);
 
     // Click Next
-    await page.evaluate(({ nextText }) => {
-      const buttons = Array.from(document.querySelectorAll('div[role="none"]'));
-      const nextBtn = buttons.find((btn) => btn.textContent.includes(nextText));
-      if (nextBtn) nextBtn.click();
-    }, { nextText: SELECTORS.TWO_FA.NEXT_TEXT });
+    await page.evaluate(
+      ({ nextText }) => {
+        const buttons = Array.from(
+          document.querySelectorAll('div[role="none"]'),
+        );
+        const nextBtn = buttons.find((btn) =>
+          btn.textContent.includes(nextText),
+        );
+        if (nextBtn) nextBtn.click();
+      },
+      { nextText: SELECTORS.TWO_FA.NEXT_TEXT },
+    );
 
     await sleep(cfg.delayAfterClick || 2000);
 
@@ -1385,31 +1433,43 @@ async function enable2FA(account, page, hotmailList, hotmailIndex, browser) {
     await sleep(cfg.delayAfterClick || 2000);
 
     // Click Next visible cuối
-    await page.evaluate(({ nextText }) => {
-      const buttons = Array.from(document.querySelectorAll('div[role="none"]'));
-      const visibleNextBtns = buttons.filter((btn) => {
-        if (!btn.textContent.includes(nextText)) return false;
-        const rect = btn.getBoundingClientRect();
-        const style = window.getComputedStyle(btn);
-        return (
-          rect.width > 0 &&
-          rect.height > 0 &&
-          style.visibility !== "hidden" &&
-          style.display !== "none"
+    await page.evaluate(
+      ({ nextText }) => {
+        const buttons = Array.from(
+          document.querySelectorAll('div[role="none"]'),
         );
-      });
-      if (visibleNextBtns.length > 0)
-        visibleNextBtns[visibleNextBtns.length - 1].click();
-    }, { nextText: SELECTORS.TWO_FA.NEXT_TEXT });
+        const visibleNextBtns = buttons.filter((btn) => {
+          if (!btn.textContent.includes(nextText)) return false;
+          const rect = btn.getBoundingClientRect();
+          const style = window.getComputedStyle(btn);
+          return (
+            rect.width > 0 &&
+            rect.height > 0 &&
+            style.visibility !== "hidden" &&
+            style.display !== "none"
+          );
+        });
+        if (visibleNextBtns.length > 0)
+          visibleNextBtns[visibleNextBtns.length - 1].click();
+      },
+      { nextText: SELECTORS.TWO_FA.NEXT_TEXT },
+    );
 
     await sleep(2000);
 
     // Click Next lần 2
-    await page.evaluate(({ nextText }) => {
-      const buttons = Array.from(document.querySelectorAll('div[role="none"]'));
-      const nextBtn = buttons.find((btn) => btn.textContent.includes(nextText));
-      if (nextBtn) nextBtn.click();
-    }, { nextText: SELECTORS.TWO_FA.NEXT_TEXT });
+    await page.evaluate(
+      ({ nextText }) => {
+        const buttons = Array.from(
+          document.querySelectorAll('div[role="none"]'),
+        );
+        const nextBtn = buttons.find((btn) =>
+          btn.textContent.includes(nextText),
+        );
+        if (nextBtn) nextBtn.click();
+      },
+      { nextText: SELECTORS.TWO_FA.NEXT_TEXT },
+    );
 
     log(`✓ 2FA submitted for ${account.username}!`);
     await sleep(10000);
@@ -1464,6 +1524,96 @@ async function enable2FA(account, page, hotmailList, hotmailIndex, browser) {
       error: error.message,
     };
   }
+}
+
+async function checkCurrentIP(page) {
+  try {
+    await page.goto("https://api.ipify.org?format=json", {
+      waitUntil: "networkidle0",
+      timeout: 10000,
+    });
+
+    const ip = await page.evaluate(() => {
+      return JSON.parse(document.body.textContent).ip;
+    });
+
+    console.log(`🌐 Current IP: ${ip}`);
+    return ip;
+  } catch (error) {
+    console.error("⚠️ Cannot retrieve IP:", error.message);
+    return null;
+  }
+}
+
+async function checkBrowserLocation() {
+  const result = {
+    geolocation: null,
+    ipLocation: null,
+    mismatch: false,
+    error: null,
+  };
+
+  // 1️⃣ Lấy location từ Geolocation API
+  try {
+    result.geolocation = await new Promise((resolve, reject) => {
+      if (!navigator.geolocation) {
+        return reject("Geolocation not supported");
+      }
+
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          resolve({
+            latitude: pos.coords.latitude,
+            longitude: pos.coords.longitude,
+            accuracy: pos.coords.faccuracy,
+          });
+        },
+        (err) => reject(err.message),
+        {
+          enableHighAccuracy: true,
+          timeout: 10000,
+        },
+      );
+    });
+  } catch (e) {
+    result.error = "Geolocation error: " + e;
+  }
+
+  // 2️⃣ Lấy location theo IP
+  try {
+    const res = await fetch("https://ipinfo.io/json");
+    const data = await res.json();
+
+    if (data.loc) {
+      const [lat, lon] = data.loc.split(",");
+      result.ipLocation = {
+        latitude: Number(lat),
+        longitude: Number(lon),
+        city: data.city,
+        country: data.country,
+        ip: data.ip,
+      };
+    }
+  } catch (e) {
+    result.error = "IP location error: " + e;
+  }
+
+  // 3️⃣ So sánh lệch location
+  if (result.geolocation && result.ipLocation) {
+    const latDiff = Math.abs(
+      result.geolocation.latitude - result.ipLocation.latitude,
+    );
+    const lonDiff = Math.abs(
+      result.geolocation.longitude - result.ipLocation.longitude,
+    );
+
+    // Lệch ~ >100km (1 độ ≈ 111km)
+    if (latDiff > 1 || lonDiff > 1) {
+      result.mismatch = true;
+    }
+  }
+
+  return result;
 }
 
 // ============================================================================
@@ -1559,6 +1709,12 @@ async function main() {
     let result;
 
     try {
+      const currentIP = await checkCurrentIP(currentPage);
+      checkBrowserLocation().then((res) => {
+        console.log("📍 Browser Geolocation:", res.geolocation);
+        console.log("🌐 IP Location:", res.ipLocation);
+        console.log("⚠️ Location mismatch:", res.mismatch);
+      });
       result = await enable2FA(account, currentPage, hotmailList, i, browser);
     } catch (e) {
       log(`✗ ${e.message}`);

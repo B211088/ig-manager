@@ -1,8 +1,8 @@
 {
-  "id": 1772365441373,
-  "name": "Thread 1",
+  "id": 1772391826105,
+  "name": "Thread 3",
   "enabled": true,
-  "dataDir": "C:\\Users\\ADMIN\\Downloads\\ig-manager (1)\\ig-manager\\data\\thread1",
+  "dataDir": "C:\\Users\\ADMIN\\Downloads\\ig-manager (1)\\ig-manager\\data\\thread3",
   "useSystemVPN": true,
   "proxyEnabled": false,
   "proxyApiUrl": "http://127.0.0.1:10000/api/proxy",
