@@ -3,7 +3,7 @@
   "maxThreads": 10,
   "threads": [
     {
-      "mode": "2fa_hotmail",
+      "mode": "2fa_only",
       "id": 1772365441373,
       "name": "Thread 1",
       "enabled": true,

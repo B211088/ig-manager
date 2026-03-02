@@ -1,9 +1,6 @@
 /**
- * WORKER.JS v6.3 - FIXED HOTMAIL SAVE/REMOVE
- * Fix: hotmail lưu đúng vào success.txt khi thành công
- * Fix: nếu add hotmail thất bại → lưu vào no_hotmail.txt (đã bật 2FA, chưa add hotmail)
- * Fix: xóa hotmail khỏi file đúng cách
- * Fix: không duplicate writeSuccessAccount (bỏ lần gọi thừa trong main())
+ * WORKER.JS v6.4 - MODE SUPPORT (2fa_only / 2fa_hotmail)
+ * Fix: đọc cfg.mode để bỏ qua add hotmail khi mode = "2fa_only"
  */
 
 "use strict";
@@ -15,10 +12,6 @@ const http = require("http");
 const { simpleParser } = require("mailparser");
 const imaps = require("imap-simple");
 
-// ============================================================================
-// CONFIG
-// ============================================================================
-
 const configPath = process.argv[2];
 if (!configPath || !fs.existsSync(configPath)) {
   console.error("❌ Worker config not found:", configPath);
@@ -27,13 +20,24 @@ if (!configPath || !fs.existsSync(configPath)) {
 
 const cfg = JSON.parse(fs.readFileSync(configPath, "utf-8"));
 
+// ── GRACEFUL STOP ──────────────────────────────────────────────────────────
+// Khi manager gửi {type:"stop"}, set flag này = true
+// Worker sẽ hoàn thành acc hiện tại rồi dừng, không xử lý acc tiếp theo
+let shouldStop = false;
+
+process.on("message", (msg) => {
+  if (msg && msg.type === "stop") {
+    shouldStop = true;
+    log("⏹️ Stop signal received — sẽ dừng sau khi xong acc hiện tại...");
+  }
+});
+
 const DATA_DIR = path.isAbsolute(cfg.dataDir)
   ? cfg.dataDir
   : path.join(__dirname, cfg.dataDir);
 const INPUT_FILE = path.join(DATA_DIR, "input.txt");
 const OUTPUT_FILE = path.join(DATA_DIR, "success.txt");
 const FAILED_FILE = path.join(DATA_DIR, "failed.txt");
-// File mới: đã bật 2FA thành công nhưng chưa add được hotmail
 const NO_HOTMAIL_FILE = path.join(DATA_DIR, "no_hotmail.txt");
 const SCREENSHOT_DIR = path.join(DATA_DIR, "screenshots");
 const HOTMAIL_FILE = cfg.hotmailFile
@@ -41,10 +45,6 @@ const HOTMAIL_FILE = cfg.hotmailFile
     ? cfg.hotmailFile
     : path.join(__dirname, cfg.hotmailFile)
   : path.join(DATA_DIR, "hotmail.txt");
-
-// ============================================================================
-// SELECTORS
-// ============================================================================
 
 const SELECTORS = {
   EMAIL_VERIFICATION: {
@@ -57,7 +57,6 @@ const SELECTORS = {
     ],
     CONTINUE_TEXT: "Continue",
   },
-
   TWO_FA: {
     USERNAME_DIV:
       "div.x1qjc9v5.x9f619.x78zum5.xdl72j9.xdt5ytf.x2lah0s.x2lwn1j.xeuugli.x1n2onr6.x1ja2u2z",
@@ -75,7 +74,6 @@ const SELECTORS = {
       'input[type="text"]',
     ],
   },
-
   HOTMAIL: {
     EMAIL_INPUT: [
       'input[type="text"][aria-invalid="false"]',
@@ -93,37 +91,29 @@ const SELECTORS = {
   },
 };
 
-// ============================================================================
-// LOGGING
-// ============================================================================
-
 function log(msg) {
-  if (process.send) process.send({ type: "log", text: msg });
-  console.log(msg);
+  // Nếu có process.send (chạy qua fork từ manager) thì chỉ dùng IPC,
+  // KHÔNG console.log — tránh manager nhận 2 lần (stdout + message)
+  if (process.send) {
+    process.send({ type: "log", text: msg });
+  } else {
+    // Chạy độc lập (không qua fork) thì in ra console bình thường
+    console.log(msg);
+  }
 }
 
 function logProgress(data) {
   if (process.send) process.send({ type: "progress", ...data });
 }
 
-// ============================================================================
-// UTILITY
-// ============================================================================
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function safeClosePage(page) {
-  if (page)
-    try {
-      await page.close();
-    } catch (_) {}
+  if (page) try { await page.close(); } catch (_) {}
 }
 
 async function safeCloseBrowser(browser) {
-  if (browser)
-    try {
-      await browser.close();
-    } catch (_) {}
+  if (browser) try { await browser.close(); } catch (_) {}
 }
 
 async function safeScreenshot(page, filepath) {
@@ -135,10 +125,7 @@ async function safeScreenshot(page, filepath) {
 
 async function gotoIG(page, url) {
   try {
-    await page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: cfg.browserTimeout || 30000,
-    });
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: cfg.browserTimeout || 30000 });
   } catch (e) {
     if (
       e.message.includes("ERR_ABORTED") ||
@@ -154,10 +141,7 @@ async function gotoIG(page, url) {
 
 async function gotoAccountsCenter(page, url) {
   try {
-    await page.goto(url, {
-      waitUntil: "networkidle",
-      timeout: cfg.browserTimeout || 30000,
-    });
+    await page.goto(url, { waitUntil: "networkidle", timeout: cfg.browserTimeout || 30000 });
     await sleep(1000);
     return;
   } catch (e) {
@@ -171,13 +155,9 @@ async function gotoAccountsCenter(page, url) {
     } else throw e;
   }
   try {
-    await page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: cfg.browserTimeout || 30000,
-    });
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: cfg.browserTimeout || 30000 });
   } catch (e) {
-    if (!e.message.includes("ERR_ABORTED") && !e.message.includes("net::ERR_"))
-      throw e;
+    if (!e.message.includes("ERR_ABORTED") && !e.message.includes("net::ERR_")) throw e;
   }
   await sleep(4000);
 }
@@ -185,11 +165,7 @@ async function gotoAccountsCenter(page, url) {
 async function waitForText(page, text, timeout = 10000) {
   try {
     await page.waitForFunction(
-      (searchText) => {
-        return Array.from(document.querySelectorAll("*")).some((el) =>
-          el.textContent.trim().includes(searchText),
-        );
-      },
+      (searchText) => Array.from(document.querySelectorAll("*")).some((el) => el.textContent.trim().includes(searchText)),
       text,
       { timeout },
     );
@@ -205,10 +181,7 @@ async function tryInputSelectors(page, selectors, value, clickFirst = true) {
     try {
       const input = await page.$(selector);
       if (input) {
-        if (clickFirst) {
-          await input.click();
-          await sleep(cfg.delayShort || 500);
-        }
+        if (clickFirst) { await input.click(); await sleep(cfg.delayShort || 500); }
         await input.type(value, { delay: cfg.delayInputType || 100 });
         log(`✓ Input OK: ${selector}`);
         return true;
@@ -220,20 +193,10 @@ async function tryInputSelectors(page, selectors, value, clickFirst = true) {
   return false;
 }
 
-// ============================================================================
-// PLAYWRIGHT
-// ============================================================================
-
 function getPlaywright() {
-  try {
-    return require("playwright-core");
-  } catch (_) {}
-  try {
-    return require("playwright");
-  } catch (_) {}
-  throw new Error(
-    "Playwright not installed!\nRun: npm install playwright-core && npx playwright install chromium",
-  );
+  try { return require("playwright-core"); } catch (_) {}
+  try { return require("playwright"); } catch (_) {}
+  throw new Error("Playwright not installed!\nRun: npm install playwright-core && npx playwright install chromium");
 }
 
 async function launchBrowser(proxyUrl = null) {
@@ -259,17 +222,11 @@ async function launchBrowser(proxyUrl = null) {
 async function newPage(browser) {
   const context = await browser.newContext({
     locale: "en-US",
-    userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-      "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     viewport: { width: 1280, height: 800 },
   });
   return context.newPage();
 }
-
-// ============================================================================
-// COOKIES
-// ============================================================================
 
 function normalizeSameSite(val) {
   if (!val) return "Lax";
@@ -293,11 +250,7 @@ async function importCookies(page, cookieString) {
         secure: Boolean(c.secure),
         sameSite: normalizeSameSite(c.sameSite),
       };
-      if (
-        c.expirationDate &&
-        isFinite(c.expirationDate) &&
-        c.expirationDate > 0
-      ) {
+      if (c.expirationDate && isFinite(c.expirationDate) && c.expirationDate > 0) {
         cookie.expires = Math.floor(c.expirationDate);
       }
       return cookie;
@@ -305,10 +258,6 @@ async function importCookies(page, cookieString) {
   await page.context().addCookies(cookies);
   log(`✓ Cookies imported: ${cookies.length}`);
 }
-
-// ============================================================================
-// IMAP
-// ============================================================================
 
 function extractVerificationCode(textContent, digitCount) {
   const pattern = new RegExp(`\\b\\d{${digitCount}}\\b`);
@@ -354,16 +303,8 @@ async function getVerificationCodeFromEmail(email, password, digitCount) {
           const emailTime = new Date(parsed.date);
           const bufferTime = new Date(searchStartTime.getTime() - 30000);
           if (emailTime >= bufferTime) {
-            const code = extractVerificationCode(
-              parsed.text || parsed.html || "",
-              digitCount,
-            );
-            if (code)
-              emailsWithTime.push({
-                uid: message.attributes.uid,
-                date: emailTime,
-                code,
-              });
+            const code = extractVerificationCode(parsed.text || parsed.html || "", digitCount);
+            if (code) emailsWithTime.push({ uid: message.attributes.uid, date: emailTime, code });
           }
         }
         emailsWithTime.sort((a, b) => b.date - a.date);
@@ -382,103 +323,55 @@ async function getVerificationCodeFromEmail(email, password, digitCount) {
     }
     throw new Error(`Code not found after ${maxRetries} attempts`);
   } finally {
-    try {
-      connection.end();
-    } catch (_) {}
+    try { connection.end(); } catch (_) {}
   }
 }
-
-// ============================================================================
-// 2FA TOKEN
-// ============================================================================
 
 async function get2FAToken(secret) {
   const url = `${cfg.twoFaApiUrl || "https://2fa.live/tok"}/${secret}`;
   log(`🔑 Fetching 2FA token...`);
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(
-      () => reject(new Error("2FA API timeout")),
-      10000,
-    );
-    https
-      .get(url, (res) => {
-        let data = "";
-        res.on("data", (c) => (data += c));
-        res.on("end", () => {
-          clearTimeout(timeout);
-          try {
-            resolve(JSON.parse(data).token);
-          } catch (e) {
-            reject(new Error(`Invalid 2FA response: ${data}`));
-          }
-        });
-      })
-      .on("error", (e) => {
+    const timeout = setTimeout(() => reject(new Error("2FA API timeout")), 10000);
+    https.get(url, (res) => {
+      let data = "";
+      res.on("data", (c) => (data += c));
+      res.on("end", () => {
         clearTimeout(timeout);
-        reject(e);
+        try { resolve(JSON.parse(data).token); }
+        catch (e) { reject(new Error(`Invalid 2FA response: ${data}`)); }
       });
+    }).on("error", (e) => { clearTimeout(timeout); reject(e); });
   });
 }
-
-// ============================================================================
-// PROXY
-// ============================================================================
 
 async function get9ProxyList() {
   const url = `${cfg.proxyApiUrl}?t=2&num=${cfg.proxyCount}&country=${cfg.proxyCountry}`;
   return new Promise((resolve, reject) => {
     const proto = url.startsWith("https") ? https : http;
     const timeout = setTimeout(() => reject(new Error("Proxy timeout")), 15000);
-    proto
-      .get(url, (res) => {
-        let data = "";
-        res.on("data", (c) => (data += c));
-        res.on("end", () => {
-          clearTimeout(timeout);
-          try {
-            const json = JSON.parse(data);
-            if (json.error !== false) throw new Error(json.message);
-            resolve(json.data);
-          } catch (e) {
-            reject(e);
-          }
-        });
-      })
-      .on("error", (e) => {
+    proto.get(url, (res) => {
+      let data = "";
+      res.on("data", (c) => (data += c));
+      res.on("end", () => {
         clearTimeout(timeout);
-        reject(e);
+        try {
+          const json = JSON.parse(data);
+          if (json.error !== false) throw new Error(json.message);
+          resolve(json.data);
+        } catch (e) { reject(e); }
       });
+    }).on("error", (e) => { clearTimeout(timeout); reject(e); });
   });
 }
 
-// ============================================================================
-// HOTMAIL
-// ============================================================================
-
 function readHotmailFile() {
-  if (!fs.existsSync(HOTMAIL_FILE)) {
-    log("⚠️ hotmail.txt not found");
-    return [];
-  }
-  return fs
-    .readFileSync(HOTMAIL_FILE, "utf-8")
-    .trim()
-    .split("\n")
-    .filter((l) => l.trim())
+  if (!fs.existsSync(HOTMAIL_FILE)) { log("⚠️ hotmail.txt not found"); return []; }
+  return fs.readFileSync(HOTMAIL_FILE, "utf-8").trim().split("\n").filter((l) => l.trim())
     .map((line, i) => {
       const p = line.split("|");
-      if (p.length < 4) {
-        log(`⚠️ Hotmail line ${i + 1}: invalid, skipping`);
-        return null;
-      }
-      return {
-        hotmail: p[0]?.trim() || "",
-        hotmailPassword: p[1]?.trim() || "",
-        refreshToken: p[2]?.trim() || "",
-        clientId: p[3]?.trim() || "",
-      };
-    })
-    .filter(Boolean);
+      if (p.length < 4) { log(`⚠️ Hotmail line ${i + 1}: invalid, skipping`); return null; }
+      return { hotmail: p[0]?.trim() || "", hotmailPassword: p[1]?.trim() || "", refreshToken: p[2]?.trim() || "", clientId: p[3]?.trim() || "" };
+    }).filter(Boolean);
 }
 
 async function getHotmailVerificationCode(page, hotmailData) {
@@ -496,99 +389,56 @@ async function getHotmailVerificationCode(page, hotmailData) {
       log(`🔍 Hotmail attempt ${attempt}/${maxRetries}`);
       try {
         await mailPage.waitForSelector("#list_email", { timeout: 10000 });
-        await mailPage.evaluate(
-          ({ text }) => {
-            const input = document.querySelector("#list_email");
-            if (!input) return;
-            input.value = text;
-            input.dispatchEvent(new Event("input", { bubbles: true }));
-            input.dispatchEvent(new Event("change", { bubbles: true }));
-          },
-          { text: emailLine },
-        );
+        await mailPage.evaluate(({ text }) => {
+          const input = document.querySelector("#list_email");
+          if (!input) return;
+          input.value = text;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+        }, { text: emailLine });
 
         await mailPage.click(".btn-checked");
-        await mailPage.waitForSelector("td.readmail_code span[id]", {
-          timeout: 15000,
-        });
-        const code = await mailPage.$eval("td.readmail_code span[id]", (el) =>
-          el.textContent.trim(),
-        );
+        await mailPage.waitForSelector("td.readmail_code span[id]", { timeout: 15000 });
+        const code = await mailPage.$eval("td.readmail_code span[id]", (el) => el.textContent.trim());
 
-        if (/^\d{6}$/.test(code)) {
-          log(`✓ Hotmail code: ${code}`);
-          return code;
-        }
+        if (/^\d{6}$/.test(code)) { log(`✓ Hotmail code: ${code}`); return code; }
       } catch (err) {
         log(`⚠️ Hotmail attempt ${attempt}: ${err.message.substring(0, 60)}`);
       }
       await sleep(5000);
-      try {
-        await mailPage.reload({ waitUntil: "domcontentloaded" });
-      } catch (_) {}
+      try { await mailPage.reload({ waitUntil: "domcontentloaded" }); } catch (_) {}
     }
     throw new Error("Cannot get hotmail code after retries");
   } finally {
-    try {
-      await mailPage.close();
-    } catch (_) {}
+    try { await mailPage.close(); } catch (_) {}
   }
 }
 
-/**
- * Xóa một hotmail khỏi file hotmail.txt sau khi đã dùng thành công
- */
 function removeHotmailFromFile(hotmail) {
   try {
     log(`🗑️ Removing hotmail from file: ${hotmail}`);
-    log(`🔍 HOTMAIL_FILE = ${HOTMAIL_FILE}`);
-
-    if (!fs.existsSync(HOTMAIL_FILE)) {
-      log(`⚠️ HOTMAIL_FILE không tồn tại: ${HOTMAIL_FILE}`);
-      return;
-    }
+    if (!fs.existsSync(HOTMAIL_FILE)) { log(`⚠️ HOTMAIL_FILE không tồn tại: ${HOTMAIL_FILE}`); return; }
 
     const content = fs.readFileSync(HOTMAIL_FILE, "utf-8");
     const lines = content.split("\n").filter((l) => l.trim());
-
-    log(`🔍 Total lines in hotmail.txt = ${lines.length}`);
-
     const remaining = lines.filter((line) => {
       const lineEmail = line.split("|")[0]?.trim();
-      const matches = lineEmail === hotmail;
-      if (matches) log(`🔍 Found & removing: "${lineEmail}"`);
-      return !matches;
+      if (lineEmail === hotmail) { log(`🔍 Found & removing: "${lineEmail}"`); return false; }
+      return true;
     });
 
-    if (remaining.length === lines.length) {
-      log(`⚠️ Hotmail "${hotmail}" NOT FOUND in file — không xóa`);
-      return;
-    }
+    if (remaining.length === lines.length) { log(`⚠️ Hotmail "${hotmail}" NOT FOUND in file`); return; }
 
-    const newContent = remaining.join("\n") + (remaining.length ? "\n" : "");
-    fs.writeFileSync(HOTMAIL_FILE, newContent, "utf-8");
-
-    // Verify
-    const verifyLines = fs
-      .readFileSync(HOTMAIL_FILE, "utf-8")
-      .split("\n")
-      .filter((l) => l.trim());
+    fs.writeFileSync(HOTMAIL_FILE, remaining.join("\n") + (remaining.length ? "\n" : ""), "utf-8");
+    const verifyLines = fs.readFileSync(HOTMAIL_FILE, "utf-8").split("\n").filter((l) => l.trim());
     log(`✅ Removed hotmail: ${hotmail} (${verifyLines.length} lines remaining)`);
   } catch (e) {
     log(`❌ Remove hotmail error: ${e.message}`);
   }
 }
 
-// ============================================================================
-// FILE I/O
-// ============================================================================
-
 function readInputFile() {
-  return fs
-    .readFileSync(INPUT_FILE, "utf-8")
-    .trim()
-    .split("\n")
-    .filter((l) => l.trim())
+  return fs.readFileSync(INPUT_FILE, "utf-8").trim().split("\n").filter((l) => l.trim())
     .map((line, i) => {
       const p = line.split("|");
       if (p.length < 7) throw new Error(`Line ${i + 1}: need 7+ fields`);
@@ -606,10 +456,6 @@ function readInputFile() {
     });
 }
 
-/**
- * Lưu vào success.txt — kèm hotmail nếu có
- * Format: username|password|2fa_secret|igEmail|gmxMail|gmxPassword|posts|followers|following|hmEmail|hmPassword|hmRefreshToken|hmClientId|cookies
- */
 function writeSuccessAccount(account, twoFASecret, hotmailData) {
   const safeTwoFA = twoFASecret.includes(" ")
     ? twoFASecret
@@ -620,59 +466,32 @@ function writeSuccessAccount(account, twoFASecret, hotmailData) {
   const hmRefreshToken = hotmailData?.refreshToken || "";
   const hmClientId = hotmailData?.clientId || "";
 
-  const line =
-    [
-      account.username,
-      account.password,
-      safeTwoFA,
-      account.igEmail,
-      account.gmxMail,
-      account.gmxPassword,
-      account.posts,
-      account.followers,
-      account.following,
-      hmEmail,
-      hmPassword,
-      hmRefreshToken,
-      hmClientId,
-      account.cookies || "",
-    ].join("|") + "\n";
+  const line = [
+    account.username, account.password, safeTwoFA, account.igEmail,
+    account.gmxMail, account.gmxPassword, account.posts, account.followers,
+    account.following, hmEmail, hmPassword, hmRefreshToken, hmClientId,
+    account.cookies || "",
+  ].join("|") + "\n";
 
   fs.appendFileSync(OUTPUT_FILE, line, "utf-8");
   log(`💾 Saved to success.txt: ${account.username} | hotmail: ${hmEmail || "none"}`);
 }
 
-/**
- * Lưu vào no_hotmail.txt — đã bật 2FA thành công nhưng add hotmail thất bại
- * Format: username|password|2fa_secret|igEmail|gmxMail|gmxPassword|posts|followers|following|cookies|hotmail_error
- */
 function writeNoHotmailAccount(account, twoFASecret, hotmailError) {
   const safeTwoFA = twoFASecret.includes(" ")
     ? twoFASecret
     : (twoFASecret.match(/.{1,4}/g) || [twoFASecret]).join(" ");
 
-  const line =
-    [
-      account.username,
-      account.password,
-      safeTwoFA,
-      account.igEmail,
-      account.gmxMail,
-      account.gmxPassword,
-      account.posts,
-      account.followers,
-      account.following,
-      account.cookies || "",
-      hotmailError || "hotmail_add_failed",
-    ].join("|") + "\n";
+  const line = [
+    account.username, account.password, safeTwoFA, account.igEmail,
+    account.gmxMail, account.gmxPassword, account.posts, account.followers,
+    account.following, account.cookies || "", hotmailError || "hotmail_add_failed",
+  ].join("|") + "\n";
 
   fs.appendFileSync(NO_HOTMAIL_FILE, line, "utf-8");
   log(`📝 Saved to no_hotmail.txt: ${account.username} (reason: ${hotmailError})`);
 }
 
-/**
- * Lưu vào failed.txt — toàn bộ thất bại (sai cookie, lỗi 2FA, v.v.)
- */
 function writeFailedAccount(account, reason) {
   const line = `${account.username}|${account.password}|${account.igEmail}|${account.gmxMail}|${account.gmxPassword}|${account.posts}|${account.followers}|${account.following}|${account.cookies}|${reason}\n`;
   fs.appendFileSync(FAILED_FILE, line, "utf-8");
@@ -682,76 +501,41 @@ function writeFailedAccount(account, reason) {
 function removeAccountFromInput(username) {
   try {
     const content = fs.readFileSync(INPUT_FILE, "utf-8");
-    const remaining = content
-      .trim()
-      .split("\n")
-      .filter((line) => line.split("|")[0]?.trim() !== username);
-    fs.writeFileSync(
-      INPUT_FILE,
-      remaining.join("\n") + (remaining.length ? "\n" : ""),
-      "utf-8",
-    );
+    const remaining = content.trim().split("\n").filter((line) => line.split("|")[0]?.trim() !== username);
+    fs.writeFileSync(INPUT_FILE, remaining.join("\n") + (remaining.length ? "\n" : ""), "utf-8");
     log(`🗑️ Removed from input: ${username}`);
   } catch (e) {
     log(`⚠️ Remove error: ${e.message}`);
   }
 }
 
-// ============================================================================
-// INSTAGRAM HANDLERS
-// ============================================================================
-
 async function handleEmailVerificationIfNeeded(page, account) {
-  console.log("🔍 Checking email verification...");
+  log("🔍 Checking email verification...");
   await sleep(cfg.delayAfterClick || 2000);
 
-  const checkEmailExists = await page.evaluate(
-    ({ checkText }) => {
-      const spans = Array.from(document.querySelectorAll("span"));
-      return spans.some(
-        (span) =>
-          span.textContent.trim() === checkText &&
-          span.className.includes("x1ill7wo"),
-      );
-    },
-    { checkText: SELECTORS.EMAIL_VERIFICATION.CHECK_EMAIL_TEXT },
-  );
+  const checkEmailExists = await page.evaluate(({ checkText }) => {
+    const spans = Array.from(document.querySelectorAll("span"));
+    return spans.some((span) => span.textContent.trim() === checkText && span.className.includes("x1ill7wo"));
+  }, { checkText: SELECTORS.EMAIL_VERIFICATION.CHECK_EMAIL_TEXT });
 
-  if (!checkEmailExists) {
-    log("✓ No email verification required");
-    return true;
-  }
+  if (!checkEmailExists) { log("✓ No email verification required"); return true; }
 
   log("⚠️ Email verification required!");
   await sleep(cfg.delayExtraLong || 5000);
 
-  const code8Digit = await getVerificationCodeFromEmail(
-    account.igEmail,
-    account.gmxPassword,
-    8,
-  );
+  const code8Digit = await getVerificationCodeFromEmail(account.igEmail, account.gmxPassword, 8);
   log(`✓ Code: ${code8Digit}`);
 
-  const inputSuccess = await tryInputSelectors(
-    page,
-    SELECTORS.EMAIL_VERIFICATION.INPUT,
-    code8Digit,
-  );
-  if (!inputSuccess)
-    throw new Error("Could not find input for verification code");
+  const inputSuccess = await tryInputSelectors(page, SELECTORS.EMAIL_VERIFICATION.INPUT, code8Digit);
+  if (!inputSuccess) throw new Error("Could not find input for verification code");
 
   await sleep(cfg.delayMedium || 2000);
 
-  await page.evaluate(
-    ({ continueText }) => {
-      const spans = Array.from(document.querySelectorAll("span"));
-      const continueBtn = spans.find(
-        (s) => s.textContent.trim() === continueText,
-      );
-      if (continueBtn) continueBtn.closest('div[role="none"]').click();
-    },
-    { continueText: SELECTORS.EMAIL_VERIFICATION.CONTINUE_TEXT },
-  );
+  await page.evaluate(({ continueText }) => {
+    const spans = Array.from(document.querySelectorAll("span"));
+    const continueBtn = spans.find((s) => s.textContent.trim() === continueText);
+    if (continueBtn) continueBtn.closest('div[role="none"]').click();
+  }, { continueText: SELECTORS.EMAIL_VERIFICATION.CONTINUE_TEXT });
 
   await sleep(cfg.delayPageLoad || 3000);
   log("✓ Email verification done");
@@ -769,138 +553,73 @@ async function handlePostSetupDialogs(page, account) {
     log("📜 Terms & Conditions");
     await sleep(4000);
 
-    const nextClicked = await page.evaluate(
-      ({ nextText }) => {
-        const buttons = Array.from(
-          document.querySelectorAll('div[role="button"]'),
-        );
-        const nextBtn = buttons.find(
-          (btn) => btn.textContent.trim() === nextText,
-        );
-        if (nextBtn) {
-          nextBtn.click();
-          return true;
-        }
-        return false;
-      },
-      { nextText: SELECTORS.TWO_FA.NEXT_TEXT },
-    );
-    if (nextClicked) {
-      log("✓ Clicked Next");
-      await sleep(cfg.delayPageLoad || 3000);
-    }
+    const nextClicked = await page.evaluate(({ nextText }) => {
+      const buttons = Array.from(document.querySelectorAll('div[role="button"]'));
+      const nextBtn = buttons.find((btn) => btn.textContent.trim() === nextText);
+      if (nextBtn) { nextBtn.click(); return true; }
+      return false;
+    }, { nextText: SELECTORS.TWO_FA.NEXT_TEXT });
+    if (nextClicked) { log("✓ Clicked Next"); await sleep(cfg.delayPageLoad || 3000); }
 
     await sleep(cfg.delayMedium || 2000);
 
     const agreeClicked = await page.evaluate(() => {
-      const buttons = Array.from(
-        document.querySelectorAll('div[role="button"]'),
-      );
-      const agreeBtn = buttons.find(
-        (btn) => btn.textContent.trim() === "Agree to Terms",
-      );
-      if (agreeBtn) {
-        agreeBtn.click();
-        return true;
-      }
+      const buttons = Array.from(document.querySelectorAll('div[role="button"]'));
+      const agreeBtn = buttons.find((btn) => btn.textContent.trim() === "Agree to Terms");
+      if (agreeBtn) { agreeBtn.click(); return true; }
       return false;
     });
-    if (agreeClicked) {
-      log("✓ Clicked Agree");
-      await sleep(cfg.delayPageLoad || 3000);
-    }
+    if (agreeClicked) { log("✓ Clicked Agree"); await sleep(cfg.delayPageLoad || 3000); }
 
     await sleep(cfg.delayMedium || 2000);
     const urlAfter = page.url();
-    if (
-      urlAfter.includes("/api/v1/discover/ayml/") ||
-      urlAfter.includes("instagram.com")
-    ) {
+    if (urlAfter.includes("/api/v1/discover/ayml/") || urlAfter.includes("instagram.com")) {
       await gotoIG(page, "https://www.instagram.com/");
       await sleep(cfg.delayPageLoad || 3000);
     }
     return true;
   }
 
-  if (
-    currentUrlFast.includes("instagram.com") &&
-    !currentUrlFast.includes("challenge") &&
-    !currentUrlFast.includes("accounts") &&
-    !currentUrlFast.includes("terms")
-  ) {
-    log("🏠 Already at homepage");
-    return true;
+  if (currentUrlFast.includes("instagram.com") && !currentUrlFast.includes("challenge") && !currentUrlFast.includes("accounts") && !currentUrlFast.includes("terms")) {
+    log("🏠 Already at homepage"); return true;
   }
 
-  const isNewLook = await page.evaluate(() => {
-    return Array.from(document.querySelectorAll("span")).some((el) =>
-      el.textContent.includes("The messaging tab has a new look"),
-    );
-  });
-  if (isNewLook) {
-    log("🏠 Homepage (new look)");
-    return true;
-  }
+  const isNewLook = await page.evaluate(() => Array.from(document.querySelectorAll("span")).some((el) => el.textContent.includes("The messaging tab has a new look")));
+  if (isNewLook) { log("🏠 Homepage (new look)"); return true; }
 
   const notNowClicked = await page.evaluate(() => {
     const buttons = Array.from(document.querySelectorAll('div[role="button"]'));
     const btn = buttons.find((b) => b.textContent.trim() === "Not now");
-    if (btn) {
-      btn.click();
-      return true;
-    }
+    if (btn) { btn.click(); return true; }
     return false;
   });
-  if (notNowClicked) {
-    log("✓ Clicked Not now");
-    await sleep(cfg.delayPageLoad || 3000);
-  }
+  if (notNowClicked) { log("✓ Clicked Not now"); await sleep(cfg.delayPageLoad || 3000); }
 
   await sleep(cfg.delayShort || 500);
 
-  const needsVerify = await page.evaluate(() => {
-    return Array.from(document.querySelectorAll("span")).some((el) =>
-      el.textContent.includes("Help us confirm you own this account"),
-    );
-  });
+  const needsVerify = await page.evaluate(() => Array.from(document.querySelectorAll("span")).some((el) => el.textContent.includes("Help us confirm you own this account")));
 
   if (needsVerify) {
     log("⚠️ Account verification required");
-    await safeScreenshot(
-      page,
-      path.join(SCREENSHOT_DIR, `${account.username}_verify_required.png`),
-    );
+    await safeScreenshot(page, path.join(SCREENSHOT_DIR, `${account.username}_verify_required.png`));
 
-    const sendCodeBtn = await page.$(
-      'div[data-testid="primary-button"][aria-label="Send confirmation code"]',
-    );
+    const sendCodeBtn = await page.$('div[data-testid="primary-button"][aria-label="Send confirmation code"]');
     if (sendCodeBtn) {
       await sendCodeBtn.click();
       log("📧 Confirmation code sent");
       await sleep(cfg.delayExtraLong || 5000);
 
-      const code6Digit = await getVerificationCodeFromEmail(
-        account.igEmail,
-        account.gmxPassword,
-        6,
-      );
+      const code6Digit = await getVerificationCodeFromEmail(account.igEmail, account.gmxPassword, 6);
       log(`✓ 6-digit code: ${code6Digit}`);
 
       await page.waitForSelector('input[type="number"]', { timeout: 15000 });
       await page.click('input[type="number"]');
       await sleep(cfg.delayShort || 500);
-      await page.type('input[type="number"]', code6Digit, {
-        delay: cfg.delayInputType || 100,
-      });
+      await page.type('input[type="number"]', code6Digit, { delay: cfg.delayInputType || 100 });
       await sleep(cfg.delayPageLoad || 3000);
 
-      const yesBtn = await page.$(
-        'div[data-testid="secondary-button"][aria-label="Yes, it\'s correct"]',
-      );
-      if (yesBtn) {
-        await yesBtn.click();
-        await sleep(cfg.delayPageLoad || 3000);
-      }
+      const yesBtn = await page.$('div[data-testid="secondary-button"][aria-label="Yes, it\'s correct"]');
+      if (yesBtn) { await yesBtn.click(); await sleep(cfg.delayPageLoad || 3000); }
     }
   }
 
@@ -909,34 +628,19 @@ async function handlePostSetupDialogs(page, account) {
   const notNowClicked2 = await page.evaluate(() => {
     const buttons = Array.from(document.querySelectorAll('div[role="button"]'));
     const btn = buttons.find((b) => b.textContent.trim() === "Not now");
-    if (btn) {
-      btn.click();
-      return true;
-    }
+    if (btn) { btn.click(); return true; }
     return false;
   });
-  if (notNowClicked2) {
-    log("✓ Clicked Not now (2nd)");
-    await sleep(cfg.delayPageLoad || 3000);
-  }
+  if (notNowClicked2) { log("✓ Clicked Not now (2nd)"); await sleep(cfg.delayPageLoad || 3000); }
 
   log("✓ Post-setup done");
   return true;
 }
 
-// ============================================================================
-// LOGIN CHALLENGE HANDLER
-// ============================================================================
-
 async function handleLoginChallengeDialog(page, TWO_FA_URL) {
   const hasChallenge = await page.evaluate(() => {
     return Array.from(document.querySelectorAll("h2")).some(
-      (h) =>
-        h.innerText?.includes("We Detected An Unusual Login Attempt") ||
-        h.textContent?.includes(
-          "We have detected a suspicious login attempt",
-        ) ||
-        h.textContent?.includes("suspicious login"),
+      (h) => h.innerText?.includes("We Detected An Unusual Login Attempt") || h.textContent?.includes("We have detected a suspicious login attempt") || h.textContent?.includes("suspicious login"),
     );
   });
 
@@ -946,43 +650,27 @@ async function handleLoginChallengeDialog(page, TWO_FA_URL) {
 
   const clicked = await page.evaluate(() => {
     const buttons = Array.from(document.querySelectorAll('div[role="button"]'));
-    const closeBtn = buttons.find(
-      (btn) => btn.innerText?.trim().toLowerCase() === "close",
-    );
-    if (closeBtn) {
-      closeBtn.click();
-      return true;
-    }
+    const closeBtn = buttons.find((btn) => btn.innerText?.trim().toLowerCase() === "close");
+    if (closeBtn) { closeBtn.click(); return true; }
     return false;
   });
 
-  if (!clicked) {
-    log("❌ Could not find Close button on challenge dialog");
-    return false;
-  }
+  if (!clicked) { log("❌ Could not find Close button on challenge dialog"); return false; }
 
   log("✓ Clicked Close — navigating to homepage...");
   await sleep(10000);
-
   await gotoIG(page, "https://www.instagram.com/");
   await sleep(cfg.delayPageLoad || 3000);
-
   log("🔄 Navigating to 2FA settings...");
   await gotoAccountsCenter(page, TWO_FA_URL);
   await sleep(cfg.delayAfterClick || 2000);
-
   return true;
 }
-
-// ============================================================================
-// ADD HOTMAIL
-// ============================================================================
 
 async function addHotmailToAccount(page, account, hotmailData) {
   log(`\n📧 === ADDING HOTMAIL: ${hotmailData.hotmail} ===`);
 
-  const ADD_EMAIL_URL =
-    "https://accountscenter.instagram.com/personal_info/contact_points/?contact_point_type=email&dialog_type=add_contact_point";
+  const ADD_EMAIL_URL = "https://accountscenter.instagram.com/personal_info/contact_points/?contact_point_type=email&dialog_type=add_contact_point";
 
   log("Navigating to add email page...");
   await gotoAccountsCenter(page, ADD_EMAIL_URL);
@@ -992,60 +680,38 @@ async function addHotmailToAccount(page, account, hotmailData) {
   await sleep(cfg.delayMedium || 2000);
 
   log("Entering hotmail address...");
-  const emailInputSuccess = await tryInputSelectors(
-    page,
-    SELECTORS.HOTMAIL.EMAIL_INPUT,
-    hotmailData.hotmail,
-  );
+  const emailInputSuccess = await tryInputSelectors(page, SELECTORS.HOTMAIL.EMAIL_INPUT, hotmailData.hotmail);
   if (!emailInputSuccess) throw new Error("Could not find email input field");
 
   await sleep(cfg.delayMedium || 2000);
 
   log("Selecting Instagram account checkbox...");
-  const checkboxClicked = await page.evaluate(
-    ({ username }) => {
-      const labels = Array.from(document.querySelectorAll("label"));
-      for (const label of labels) {
-        const usernameDiv = label.querySelector("div.x1qjc9v5.x9f619.x78zum5");
-        if (usernameDiv && usernameDiv.textContent.includes(username)) {
-          const checkbox = label.querySelector('input[type="checkbox"]');
-          if (checkbox && !checkbox.checked) {
-            checkbox.click();
-            return true;
-          }
-          return true;
-        }
+  const checkboxClicked = await page.evaluate(({ username }) => {
+    const labels = Array.from(document.querySelectorAll("label"));
+    for (const label of labels) {
+      const usernameDiv = label.querySelector("div.x1qjc9v5.x9f619.x78zum5");
+      if (usernameDiv && usernameDiv.textContent.includes(username)) {
+        const checkbox = label.querySelector('input[type="checkbox"]');
+        if (checkbox && !checkbox.checked) { checkbox.click(); return true; }
+        return true;
       }
-      return false;
-    },
-    { username: account.username },
-  );
+    }
+    return false;
+  }, { username: account.username });
   if (!checkboxClicked) log("⚠️ Checkbox not found, continuing...");
 
   await sleep(cfg.delayMedium || 2000);
 
   log("Clicking Next...");
-  const nextClicked = await page.evaluate(
-    ({ nextText }) => {
-      const buttons = Array.from(
-        document.querySelectorAll('div[role="button"]'),
-      );
-      const nextBtn = buttons.find((btn) => {
-        const span = btn.querySelector("span");
-        return span && span.textContent.trim() === nextText;
-      });
-      if (nextBtn) {
-        nextBtn.click();
-        return true;
-      }
-      return false;
-    },
-    { nextText: SELECTORS.HOTMAIL.NEXT_BUTTON_TEXT },
-  );
+  const nextClicked = await page.evaluate(({ nextText }) => {
+    const buttons = Array.from(document.querySelectorAll('div[role="button"]'));
+    const nextBtn = buttons.find((btn) => { const span = btn.querySelector("span"); return span && span.textContent.trim() === nextText; });
+    if (nextBtn) { nextBtn.click(); return true; }
+    return false;
+  }, { nextText: SELECTORS.HOTMAIL.NEXT_BUTTON_TEXT });
   if (!nextClicked) throw new Error("Could not click Next button");
 
   await sleep(cfg.delayPageLoad || 3000);
-
   await handleEmailVerificationIfNeeded(page, account);
 
   log("Waiting for confirmation code dialog...");
@@ -1058,124 +724,65 @@ async function addHotmailToAccount(page, account, hotmailData) {
   for (let attempt = 1; attempt <= maxCodeRetries; attempt++) {
     log(`🔑 Code attempt ${attempt}/${maxCodeRetries}`);
 
-    const verificationCode = await getHotmailVerificationCode(
-      page,
-      hotmailData,
-    );
+    const verificationCode = await getHotmailVerificationCode(page, hotmailData);
     log(`✓ Code: ${verificationCode}`);
 
-    await page.evaluate(
-      ({ selectors }) => {
-        for (const sel of selectors) {
-          const inp = document.querySelector(sel);
-          if (inp) {
-            inp.value = "";
-            inp.dispatchEvent(new Event("input", { bubbles: true }));
-            break;
-          }
-        }
-      },
-      { selectors: SELECTORS.HOTMAIL.CODE_INPUT },
-    );
+    await page.evaluate(({ selectors }) => {
+      for (const sel of selectors) {
+        const inp = document.querySelector(sel);
+        if (inp) { inp.value = ""; inp.dispatchEvent(new Event("input", { bubbles: true })); break; }
+      }
+    }, { selectors: SELECTORS.HOTMAIL.CODE_INPUT });
     await sleep(500);
 
-    const codeInputSuccess = await tryInputSelectors(
-      page,
-      SELECTORS.HOTMAIL.CODE_INPUT,
-      verificationCode,
-    );
-    if (!codeInputSuccess)
-      throw new Error("Could not find verification code input");
+    const codeInputSuccess = await tryInputSelectors(page, SELECTORS.HOTMAIL.CODE_INPUT, verificationCode);
+    if (!codeInputSuccess) throw new Error("Could not find verification code input");
 
     await sleep(cfg.delayMedium || 2000);
 
-    const finalNextClicked = await page.evaluate(
-      ({ nextText }) => {
-        const buttons = Array.from(
-          document.querySelectorAll('div[role="button"]'),
-        );
-        const nextBtns = buttons.filter((btn) => {
-          const span = btn.querySelector("span");
-          return span && span.textContent.trim() === nextText;
-        });
-        if (nextBtns.length > 0) {
-          nextBtns[nextBtns.length - 1].click();
-          return true;
-        }
-        return false;
-      },
-      { nextText: SELECTORS.HOTMAIL.NEXT_BUTTON_TEXT },
-    );
+    const finalNextClicked = await page.evaluate(({ nextText }) => {
+      const buttons = Array.from(document.querySelectorAll('div[role="button"]'));
+      const nextBtns = buttons.filter((btn) => { const span = btn.querySelector("span"); return span && span.textContent.trim() === nextText; });
+      if (nextBtns.length > 0) { nextBtns[nextBtns.length - 1].click(); return true; }
+      return false;
+    }, { nextText: SELECTORS.HOTMAIL.NEXT_BUTTON_TEXT });
     if (!finalNextClicked) throw new Error("Could not click final Next button");
 
     await sleep(cfg.delayPageLoad || 3000);
 
-    // Chỉ check wrong code để retry — success check do waitForFunction bên dưới xử lý
     const hasWrongCode = await page.evaluate(() => {
       const spans = Array.from(document.querySelectorAll("span"));
-      return spans.some(
-        (span) =>
-          span.textContent.includes("Wrong code") ||
-          span.textContent.includes("That code didn't work"),
-      );
+      return spans.some((span) => span.textContent.includes("Wrong code") || span.textContent.includes("That code didn't work"));
     });
 
-    if (hasWrongCode) {
-      log(`❌ Wrong code on attempt ${attempt}, retrying...`);
-      await sleep(cfg.delayMedium || 2000);
-      continue;
-    }
+    if (hasWrongCode) { log(`❌ Wrong code on attempt ${attempt}, retrying...`); await sleep(cfg.delayMedium || 2000); continue; }
 
-    // Không có lỗi → code được chấp nhận
     log(`✅ Code accepted on attempt ${attempt}!`);
     codeVerified = true;
     break;
   }
 
-  if (!codeVerified)
-    throw new Error(
-      `Failed to verify hotmail code after ${maxCodeRetries} attempts`,
-    );
+  if (!codeVerified) throw new Error(`Failed to verify hotmail code after ${maxCodeRetries} attempts`);
 
-  // Final success check — waitForFunction 60s giống code gốc, sạch hơn
   log("Checking for success message...");
   try {
     await page.waitForFunction(
       () => {
         const body = document.body.innerText;
-        return (
-          body.includes("You have added your email address to the selected accounts") ||
-          body.includes("You've added your email") ||
-          body.includes("You have added your email") ||
-          body.includes("added your email to the accounts")
-        );
+        return body.includes("You have added your email address to the selected accounts") || body.includes("You've added your email") || body.includes("You have added your email") || body.includes("added your email to the accounts");
       },
       { timeout: 60000, polling: 2000 },
     );
     log("✅ Hotmail added successfully!");
   } catch (_) {
     log("⚠️ Timeout — checking fallback indicators...");
-
-    // Fallback: nút Next biến mất = quá trình hoàn tất
     const hasOtherSuccessSign = await page.evaluate(() => {
       const body = document.body.innerText.toLowerCase();
-      if (
-        body.includes("you've added") ||
-        body.includes("you have added") ||
-        body.includes("added your email")
-      ) return true;
-
-      const nextButtons = Array.from(document.querySelectorAll('div[role="button"]'))
-        .filter((btn) => {
-          const span = btn.querySelector("span");
-          return span && span.textContent.trim() === "Next";
-        });
+      if (body.includes("you've added") || body.includes("you have added") || body.includes("added your email")) return true;
+      const nextButtons = Array.from(document.querySelectorAll('div[role="button"]')).filter((btn) => { const span = btn.querySelector("span"); return span && span.textContent.trim() === "Next"; });
       return nextButtons.length === 0;
     });
-
-    if (!hasOtherSuccessSign) {
-      throw new Error("Cannot confirm hotmail was added — no success indicators found");
-    }
+    if (!hasOtherSuccessSign) throw new Error("Cannot confirm hotmail was added — no success indicators found");
     log("✅ Detected success via fallback indicators");
   }
 
@@ -1185,21 +792,23 @@ async function addHotmailToAccount(page, account, hotmailData) {
   await handlePostSetupDialogs(page, account);
 
   log(`✅ Hotmail ${hotmailData.hotmail} added to ${account.username}`);
-  return hotmailData; // trả về object hotmailData trực tiếp
+  return hotmailData;
 }
 
 // ============================================================================
-// ENABLE 2FA  ← Hàm chính, chỉ gọi writeSuccessAccount / writeNoHotmailAccount TẠI ĐÂY
+// ENABLE 2FA
 // ============================================================================
 
 async function enable2FA(account, page, hotmailList, hotmailIndex) {
-  const TWO_FA_URL =
-    "https://accountscenter.instagram.com/password_and_security/two_factor/";
+  const TWO_FA_URL = "https://accountscenter.instagram.com/password_and_security/two_factor/";
 
   log(`\n=== Processing: ${account.username} ===`);
 
-  const assignedHotmail =
-    hotmailIndex < hotmailList.length ? hotmailList[hotmailIndex] : null;
+  // Đọc mode từ config — mặc định "2fa_hotmail" nếu không có
+  const workerMode = cfg.mode || "2fa_hotmail";
+  log(`📋 Mode: ${workerMode}`);
+
+  const assignedHotmail = hotmailIndex < hotmailList.length ? hotmailList[hotmailIndex] : null;
 
   try {
     // ── 1. Import cookies ────────────────────────────────────────────────
@@ -1227,11 +836,7 @@ async function enable2FA(account, page, hotmailList, hotmailIndex) {
     }
 
     if (currentPath !== expectedPath) {
-      const debugHeadings = await page.evaluate(() => {
-        return Array.from(document.querySelectorAll("h1, h2, h3")).map(
-          (h) => `[${h.tagName}] "${h.textContent.trim()}"`,
-        );
-      });
+      const debugHeadings = await page.evaluate(() => Array.from(document.querySelectorAll("h1, h2, h3")).map((h) => `[${h.tagName}] "${h.textContent.trim()}"`));
       log(`🔍 DEBUG headings: ${debugHeadings.join(" || ")}`);
 
       const handled = await handleLoginChallengeDialog(page, TWO_FA_URL);
@@ -1239,11 +844,7 @@ async function enable2FA(account, page, hotmailList, hotmailIndex) {
       if (handled) {
         const retryUrl = page.url();
         let retryPath;
-        try {
-          retryPath = new URL(retryUrl).pathname;
-        } catch (_) {
-          retryPath = retryUrl;
-        }
+        try { retryPath = new URL(retryUrl).pathname; } catch (_) { retryPath = retryUrl; }
 
         if (retryPath !== expectedPath) {
           log(`❌ Still not on 2FA page after retry: ${retryUrl}`);
@@ -1267,131 +868,59 @@ async function enable2FA(account, page, hotmailList, hotmailIndex) {
     await sleep(cfg.delayPageLoad || 3000);
 
     // ── 5. Wait for username & click ──────────────────────────────────────
-    console.log(`Enabling 2FA for ${account.username}...`);
+    log(`Enabling 2FA for ${account.username}...`);
     await waitForText(page, account.username, 12000);
     await sleep(cfg.delayMedium || 2000);
 
-    await page.evaluate(
-      ({ username, selector }) => {
-        const divs = Array.from(document.querySelectorAll(selector));
-        const targetDiv = divs.find((d) => d.textContent.trim() === username);
-        if (targetDiv) {
-          let clickableParent = targetDiv.closest(
-            'a, button, [role="button"], [onclick]',
-          );
-          if (!clickableParent)
-            clickableParent = targetDiv.closest(".x9f619.x1ja2u2z.x78zum5");
-          if (clickableParent) clickableParent.click();
-          else
-            targetDiv.parentElement.parentElement.parentElement.parentElement.parentElement.click();
-        }
-      },
-      { username: account.username, selector: SELECTORS.TWO_FA.USERNAME_DIV },
-    );
+    await page.evaluate(({ username, selector }) => {
+      const divs = Array.from(document.querySelectorAll(selector));
+      const targetDiv = divs.find((d) => d.textContent.trim() === username);
+      if (targetDiv) {
+        let clickableParent = targetDiv.closest('a, button, [role="button"], [onclick]');
+        if (!clickableParent) clickableParent = targetDiv.closest(".x9f619.x1ja2u2z.x78zum5");
+        if (clickableParent) clickableParent.click();
+        else targetDiv.parentElement.parentElement.parentElement.parentElement.parentElement.click();
+      }
+    }, { username: account.username, selector: SELECTORS.TWO_FA.USERNAME_DIV });
 
     await sleep(cfg.delayPageLoad || 3000);
 
     // ── 6. Email mismatch check ───────────────────────────────────────────
-    const emailMismatch = await page.evaluate(
-      ({ expectedEmail, cannotChangeText }) => {
-        const spans = Array.from(document.querySelectorAll("span"));
-        const whatsappSpan = spans.find((s) => {
-          const t = s.textContent.toLowerCase();
-          return (
-            t.includes("check your whatsapp") || t.includes("whatsapp messages")
-          );
-        });
-        if (whatsappSpan)
-          return {
-            mismatch: true,
-            type: "whatsapp_verification",
-            displayed: "WhatsApp",
-            reason: "Code sent to WhatsApp",
-          };
+    const emailMismatch = await page.evaluate(({ expectedEmail, cannotChangeText }) => {
+      const spans = Array.from(document.querySelectorAll("span"));
+      const whatsappSpan = spans.find((s) => { const t = s.textContent.toLowerCase(); return t.includes("check your whatsapp") || t.includes("whatsapp messages"); });
+      if (whatsappSpan) return { mismatch: true, type: "whatsapp_verification", displayed: "WhatsApp", reason: "Code sent to WhatsApp" };
 
-        const cantChangeSpan = spans.find((s) => {
-          const t = s.textContent.toLowerCase();
-          return (
-            t.includes("can't make this change") ||
-            t.includes("cannot make this change") ||
-            t.includes(cannotChangeText.toLowerCase())
-          );
-        });
-        if (cantChangeSpan)
-          return {
-            mismatch: true,
-            type: "cannot_make_change",
-            displayed: "Cannot make this change",
-            reason: "Instagram doesn't allow changes",
-          };
+      const cantChangeSpan = spans.find((s) => { const t = s.textContent.toLowerCase(); return t.includes("can't make this change") || t.includes("cannot make this change") || t.includes(cannotChangeText.toLowerCase()); });
+      if (cantChangeSpan) return { mismatch: true, type: "cannot_make_change", displayed: "Cannot make this change", reason: "Instagram doesn't allow changes" };
 
-        const codeSpan = spans.find((s) => {
-          const t = s.textContent.toLowerCase();
-          return (
-            t.includes("enter the code we sent to") ||
-            t.includes("enter the 6-digit code we sent to")
-          );
-        });
-        if (!codeSpan) return { mismatch: false };
+      const codeSpan = spans.find((s) => { const t = s.textContent.toLowerCase(); return t.includes("enter the code we sent to") || t.includes("enter the 6-digit code we sent to"); });
+      if (!codeSpan) return { mismatch: false };
 
-        const fullText = codeSpan.textContent;
-        const emailMatch = fullText.match(/[a-zA-Z0-9*]+@[a-zA-Z0-9.*]+/);
-        const phoneMatch = fullText.match(/\+?\d+[\d*]+/);
+      const fullText = codeSpan.textContent;
+      const emailMatch = fullText.match(/[a-zA-Z0-9*]+@[a-zA-Z0-9.*]+/);
+      const phoneMatch = fullText.match(/\+?\d+[\d*]+/);
 
-        if (emailMatch) {
-          const displayedEmail = emailMatch[0];
-          if (/^[A-Z]/.test(displayedEmail))
-            return {
-              mismatch: true,
-              type: "uppercase_first_letter",
-              displayed: displayedEmail,
-              reason: "Email starts with uppercase",
-            };
-          const displayedDomain = displayedEmail.split("@")[1]?.toLowerCase();
-          const expectedDomain = expectedEmail.split("@")[1]?.toLowerCase();
-          const gmxDomains = ["gmx.de", "gmx.net"];
-          const getTLD = (d) => {
-            const m = d?.match(/\.(\w+)$/);
-            return m ? m[1] : null;
-          };
-          const displayedTLD = getTLD(displayedDomain);
-          const expectedTLD = getTLD(expectedDomain);
-          if (
-            gmxDomains.includes(expectedDomain) &&
-            ["net", "de"].includes(displayedTLD)
-          )
-            return { mismatch: false };
-          if (expectedTLD && displayedTLD && displayedTLD !== expectedTLD)
-            return {
-              mismatch: true,
-              type: "domain_mismatch",
-              displayed: displayedEmail,
-              expected: expectedEmail,
-              reason: `Domain mismatch: *.${displayedTLD} vs *.${expectedTLD}`,
-            };
-        }
+      if (emailMatch) {
+        const displayedEmail = emailMatch[0];
+        if (/^[A-Z]/.test(displayedEmail)) return { mismatch: true, type: "uppercase_first_letter", displayed: displayedEmail, reason: "Email starts with uppercase" };
+        const displayedDomain = displayedEmail.split("@")[1]?.toLowerCase();
+        const expectedDomain = expectedEmail.split("@")[1]?.toLowerCase();
+        const gmxDomains = ["gmx.de", "gmx.net"];
+        const getTLD = (d) => { const m = d?.match(/\.(\w+)$/); return m ? m[1] : null; };
+        const displayedTLD = getTLD(displayedDomain);
+        const expectedTLD = getTLD(expectedDomain);
+        if (gmxDomains.includes(expectedDomain) && ["net", "de"].includes(displayedTLD)) return { mismatch: false };
+        if (expectedTLD && displayedTLD && displayedTLD !== expectedTLD) return { mismatch: true, type: "domain_mismatch", displayed: displayedEmail, expected: expectedEmail, reason: `Domain mismatch: *.${displayedTLD} vs *.${expectedTLD}` };
+      }
 
-        if (phoneMatch && !emailMatch)
-          return {
-            mismatch: true,
-            type: "phone_number",
-            displayed: phoneMatch[0],
-            reason: "Code sent to phone",
-          };
-        return { mismatch: false };
-      },
-      {
-        expectedEmail: account.igEmail,
-        cannotChangeText: SELECTORS.TWO_FA.CANNOT_CHANGE_TEXT,
-      },
-    );
+      if (phoneMatch && !emailMatch) return { mismatch: true, type: "phone_number", displayed: phoneMatch[0], reason: "Code sent to phone" };
+      return { mismatch: false };
+    }, { expectedEmail: account.igEmail, cannotChangeText: SELECTORS.TWO_FA.CANNOT_CHANGE_TEXT });
 
     if (emailMismatch.mismatch) {
       log(`⚠️ Mismatch: ${emailMismatch.type} — ${emailMismatch.reason}`);
-      writeFailedAccount(
-        account,
-        `${emailMismatch.type}: ${emailMismatch.displayed} - ${emailMismatch.reason}`,
-      );
+      writeFailedAccount(account, `${emailMismatch.type}: ${emailMismatch.displayed} - ${emailMismatch.reason}`);
       removeAccountFromInput(account.username);
       return { success: false, error: `${emailMismatch.type}: ${emailMismatch.displayed}` };
     }
@@ -1400,11 +929,7 @@ async function enable2FA(account, page, hotmailList, hotmailIndex) {
     await handleEmailVerificationIfNeeded(page, account);
 
     // ── 8. Check 2FA already on ───────────────────────────────────────────
-    const twoFAIsOn = await page.evaluate(() => {
-      return Array.from(document.querySelectorAll("span")).some(
-        (s) => s.textContent.trim() === "Two-factor authentication is on",
-      );
-    });
+    const twoFAIsOn = await page.evaluate(() => Array.from(document.querySelectorAll("span")).some((s) => s.textContent.trim() === "Two-factor authentication is on"));
     if (twoFAIsOn) {
       log("⚠️ 2FA already enabled!");
       writeFailedAccount(account, "2FA already enabled");
@@ -1417,29 +942,19 @@ async function enable2FA(account, page, hotmailList, hotmailIndex) {
     await waitForText(page, "Duo Mobile", 10000);
     await sleep(cfg.delayMedium || 2000);
 
-    await page.evaluate(
-      ({ authAppDiv }) => {
-        const divs = Array.from(document.querySelectorAll(authAppDiv));
-        const target = divs.find(
-          (d) =>
-            d.textContent.includes("Duo Mobile") &&
-            d.textContent.includes("Recommended"),
-        );
-        if (target) target.click();
-      },
-      { authAppDiv: SELECTORS.TWO_FA.AUTH_APP_DIV },
-    );
+    await page.evaluate(({ authAppDiv }) => {
+      const divs = Array.from(document.querySelectorAll(authAppDiv));
+      const target = divs.find((d) => d.textContent.includes("Duo Mobile") && d.textContent.includes("Recommended"));
+      if (target) target.click();
+    }, { authAppDiv: SELECTORS.TWO_FA.AUTH_APP_DIV });
 
     await sleep(cfg.delayAfterClick || 2000);
 
-    await page.evaluate(
-      ({ continueText }) => {
-        const spans = Array.from(document.querySelectorAll("span"));
-        const btn = spans.find((s) => s.textContent.trim() === continueText);
-        if (btn) btn.closest('div[role="none"]').click();
-      },
-      { continueText: SELECTORS.TWO_FA.CONTINUE_TEXT },
-    );
+    await page.evaluate(({ continueText }) => {
+      const spans = Array.from(document.querySelectorAll("span"));
+      const btn = spans.find((s) => s.textContent.trim() === continueText);
+      if (btn) btn.closest('div[role="none"]').click();
+    }, { continueText: SELECTORS.TWO_FA.CONTINUE_TEXT });
 
     await sleep(cfg.delayPageLoad || 3000);
 
@@ -1448,33 +963,21 @@ async function enable2FA(account, page, hotmailList, hotmailIndex) {
     await waitForText(page, "Set up two-factor authentication", 10000);
     await sleep(cfg.delayMedium || 2000);
 
-    const twoFASecret = await page.evaluate(
-      ({ secretSpan }) => {
-        const spans = Array.from(document.querySelectorAll(secretSpan));
-        const secretEl = spans.find((s) =>
-          /^[A-Z2-7\s]+$/.test(s.textContent.trim()),
-        );
-        if (secretEl) return secretEl.textContent.trim().replace(/\s/g, "");
-        return "";
-      },
-      { secretSpan: SELECTORS.TWO_FA.SECRET_SPAN },
-    );
+    const twoFASecret = await page.evaluate(({ secretSpan }) => {
+      const spans = Array.from(document.querySelectorAll(secretSpan));
+      const secretEl = spans.find((s) => /^[A-Z2-7\s]+$/.test(s.textContent.trim()));
+      if (secretEl) return secretEl.textContent.trim().replace(/\s/g, "");
+      return "";
+    }, { secretSpan: SELECTORS.TWO_FA.SECRET_SPAN });
 
     if (!twoFASecret) throw new Error("Could not find 2FA Secret");
     log(`✓ Secret: ${twoFASecret}`);
 
-    await page.evaluate(
-      ({ nextText }) => {
-        const buttons = Array.from(
-          document.querySelectorAll('div[role="none"]'),
-        );
-        const nextBtn = buttons.find((btn) =>
-          btn.textContent.includes(nextText),
-        );
-        if (nextBtn) nextBtn.click();
-      },
-      { nextText: SELECTORS.TWO_FA.NEXT_TEXT },
-    );
+    await page.evaluate(({ nextText }) => {
+      const buttons = Array.from(document.querySelectorAll('div[role="none"]'));
+      const nextBtn = buttons.find((btn) => btn.textContent.includes(nextText));
+      if (nextBtn) nextBtn.click();
+    }, { nextText: SELECTORS.TWO_FA.NEXT_TEXT });
 
     await sleep(cfg.delayAfterClick || 2000);
 
@@ -1485,51 +988,29 @@ async function enable2FA(account, page, hotmailList, hotmailIndex) {
 
     await sleep(cfg.delayAfterClick || 2000);
 
-    const inputSuccess = await tryInputSelectors(
-      page,
-      SELECTORS.TWO_FA.VERIFICATION_INPUT,
-      verificationCode,
-    );
+    const inputSuccess = await tryInputSelectors(page, SELECTORS.TWO_FA.VERIFICATION_INPUT, verificationCode);
     if (!inputSuccess) throw new Error("Could not enter verification code");
 
     await sleep(cfg.delayAfterClick || 2000);
 
-    await page.evaluate(
-      ({ nextText }) => {
-        const buttons = Array.from(
-          document.querySelectorAll('div[role="none"]'),
-        );
-        const visibleNextBtns = buttons.filter((btn) => {
-          if (!btn.textContent.includes(nextText)) return false;
-          const rect = btn.getBoundingClientRect();
-          const style = window.getComputedStyle(btn);
-          return (
-            rect.width > 0 &&
-            rect.height > 0 &&
-            style.visibility !== "hidden" &&
-            style.display !== "none"
-          );
-        });
-        if (visibleNextBtns.length > 0)
-          visibleNextBtns[visibleNextBtns.length - 1].click();
-      },
-      { nextText: SELECTORS.TWO_FA.NEXT_TEXT },
-    );
+    await page.evaluate(({ nextText }) => {
+      const buttons = Array.from(document.querySelectorAll('div[role="none"]'));
+      const visibleNextBtns = buttons.filter((btn) => {
+        if (!btn.textContent.includes(nextText)) return false;
+        const rect = btn.getBoundingClientRect();
+        const style = window.getComputedStyle(btn);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+      });
+      if (visibleNextBtns.length > 0) visibleNextBtns[visibleNextBtns.length - 1].click();
+    }, { nextText: SELECTORS.TWO_FA.NEXT_TEXT });
 
     await sleep(2000);
 
-    await page.evaluate(
-      ({ nextText }) => {
-        const buttons = Array.from(
-          document.querySelectorAll('div[role="none"]'),
-        );
-        const nextBtn = buttons.find((btn) =>
-          btn.textContent.includes(nextText),
-        );
-        if (nextBtn) nextBtn.click();
-      },
-      { nextText: SELECTORS.TWO_FA.NEXT_TEXT },
-    );
+    await page.evaluate(({ nextText }) => {
+      const buttons = Array.from(document.querySelectorAll('div[role="none"]'));
+      const nextBtn = buttons.find((btn) => btn.textContent.includes(nextText));
+      if (nextBtn) nextBtn.click();
+    }, { nextText: SELECTORS.TWO_FA.NEXT_TEXT });
 
     log(`✓ 2FA submitted for ${account.username}!`);
     await sleep(10000);
@@ -1537,7 +1018,26 @@ async function enable2FA(account, page, hotmailList, hotmailIndex) {
     await gotoIG(page, "https://www.instagram.com/");
     await sleep(cfg.delayPageLoad || 3000);
 
-    // ── 12. Add Hotmail ───────────────────────────────────────────────────
+    // ============================================================
+    // ── 12. Xử lý sau 2FA: tùy theo MODE ────────────────────────
+    // ============================================================
+
+    if (workerMode === "2fa_only") {
+      // ── MODE: 2FA Only — bỏ qua add hotmail ──────────────────
+      log("✅ Mode [2FA Only] — skipping hotmail, saving to success.txt");
+      writeSuccessAccount(account, twoFASecret, null);
+      removeAccountFromInput(account.username);
+
+      return {
+        success: true,
+        hotmailSuccess: false,
+        username: account.username,
+        twoFA: twoFASecret,
+        hotmailData: null,
+      };
+    }
+
+    // ── MODE: 2FA + Hotmail ───────────────────────────────────────
     log("\n🔄 === STARTING HOTMAIL ADDITION PROCESS ===");
 
     if (assignedHotmail) {
@@ -1546,28 +1046,17 @@ async function enable2FA(account, page, hotmailList, hotmailIndex) {
       let hotmailError = "";
 
       try {
-        const addedHotmailData = await addHotmailToAccount(
-          page,
-          account,
-          assignedHotmail,
-        );
-
-        // addHotmailToAccount trả về hotmailData object khi thành công
+        const addedHotmailData = await addHotmailToAccount(page, account, assignedHotmail);
         log(`✅ Hotmail add OK: ${addedHotmailData.hotmail}`);
         hotmailSucceeded = true;
 
-        // Xóa hotmail khỏi file (chỉ sau khi add thành công)
         await sleep(500);
         removeHotmailFromFile(assignedHotmail.hotmail);
-
-        // ✅ Lưu vào success.txt với đầy đủ hotmail info
         writeSuccessAccount(account, twoFASecret, addedHotmailData);
 
       } catch (hotmailErr) {
         hotmailError = hotmailErr.message;
         log(`❌ Hotmail add failed: ${hotmailError}`);
-
-        // ⚠️ Lưu vào no_hotmail.txt — đã bật 2FA nhưng chưa add được hotmail
         writeNoHotmailAccount(account, twoFASecret, hotmailError);
       }
 
@@ -1582,7 +1071,6 @@ async function enable2FA(account, page, hotmailList, hotmailIndex) {
       };
 
     } else {
-      // Không có hotmail nào trong danh sách
       log("⚠️ No hotmail available — saving to no_hotmail.txt");
       writeNoHotmailAccount(account, twoFASecret, "no_hotmail_available");
       removeAccountFromInput(account.username);
@@ -1611,100 +1099,46 @@ async function enable2FA(account, page, hotmailList, hotmailIndex) {
   }
 }
 
-// ============================================================================
-// CHECK IP _ LOCATION
-// ============================================================================
-
-
 async function checkBrowserLocation() {
-  const result = {
-    geolocation: null,
-    ipLocation: null,
-    mismatch: false,
-    error: null,
-  };
-
-  // 1️⃣ Lấy location từ Geolocation API
+  const result = { geolocation: null, ipLocation: null, mismatch: false, error: null };
   try {
     result.geolocation = await new Promise((resolve, reject) => {
-      if (!navigator.geolocation) {
-        return reject("Geolocation not supported");
-      }
-
+      if (!navigator.geolocation) return reject("Geolocation not supported");
       navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          resolve({
-            latitude: pos.coords.latitude,
-            longitude: pos.coords.longitude,
-            accuracy: pos.coords.faccuracy,
-          });
-        },
+        (pos) => resolve({ latitude: pos.coords.latitude, longitude: pos.coords.longitude, accuracy: pos.coords.accuracy }),
         (err) => reject(err.message),
-        {
-          enableHighAccuracy: true,
-          timeout: 10000,
-        },
+        { enableHighAccuracy: true, timeout: 10000 },
       );
     });
-  } catch (e) {
-    result.error = "Geolocation error: " + e;
-  }
+  } catch (e) { result.error = "Geolocation error: " + e; }
 
-  // 2️⃣ Lấy location theo IP
   try {
     const res = await fetch("https://ipinfo.io/json");
     const data = await res.json();
-
     if (data.loc) {
       const [lat, lon] = data.loc.split(",");
-      result.ipLocation = {
-        latitude: Number(lat),
-        longitude: Number(lon),
-        city: data.city,
-        country: data.country,
-        ip: data.ip,
-      };
+      result.ipLocation = { latitude: Number(lat), longitude: Number(lon), city: data.city, country: data.country, ip: data.ip };
     }
-  } catch (e) {
-    result.error = "IP location error: " + e;
-  }
+  } catch (e) { result.error = "IP location error: " + e; }
 
-  // 3️⃣ So sánh lệch location
   if (result.geolocation && result.ipLocation) {
-    const latDiff = Math.abs(
-      result.geolocation.latitude - result.ipLocation.latitude,
-    );
-    const lonDiff = Math.abs(
-      result.geolocation.longitude - result.ipLocation.longitude,
-    );
-
-    // Lệch ~ >100km (1 độ ≈ 111km)
-    if (latDiff > 1 || lonDiff > 1) {
-      result.mismatch = true;
-    }
+    const latDiff = Math.abs(result.geolocation.latitude - result.ipLocation.latitude);
+    const lonDiff = Math.abs(result.geolocation.longitude - result.ipLocation.longitude);
+    if (latDiff > 1 || lonDiff > 1) result.mismatch = true;
   }
-
   return result;
 }
-
-// ============================================================================
-// MAIN LOOP  
-// ============================================================================
 
 async function main() {
   log(`\n${"=".repeat(50)}`);
   log(`🚀 Worker: ${cfg.name}`);
   log(`📁 Dir:    ${DATA_DIR}`);
+  log(`📋 Mode:   ${cfg.mode || "2fa_hotmail"}`);
   log(`${"=".repeat(50)}`);
 
-  [DATA_DIR, SCREENSHOT_DIR].forEach((d) => {
-    if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
-  });
+  [DATA_DIR, SCREENSHOT_DIR].forEach((d) => { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); });
 
-  // Đảm bảo no_hotmail.txt tồn tại
-  if (!fs.existsSync(NO_HOTMAIL_FILE)) {
-    fs.writeFileSync(NO_HOTMAIL_FILE, "", "utf-8");
-  }
+  if (!fs.existsSync(NO_HOTMAIL_FILE)) fs.writeFileSync(NO_HOTMAIL_FILE, "", "utf-8");
 
   let accounts;
   try {
@@ -1715,28 +1149,25 @@ async function main() {
     process.exit(1);
   }
 
-  if (!accounts.length) {
-    log("⚠️ No accounts");
-    process.exit(0);
-  }
+  if (!accounts.length) { log("⚠️ No accounts"); process.exit(0); }
 
   let hotmailList = [];
-  try {
-    hotmailList = readHotmailFile();
-    log(`✓ Hotmail: ${hotmailList.length}`);
-  } catch (e) {
-    log(`⚠️ Hotmail error: ${e.message}`);
+  if ((cfg.mode || "2fa_hotmail") === "2fa_hotmail") {
+    try {
+      hotmailList = readHotmailFile();
+      log(`✓ Hotmail: ${hotmailList.length}`);
+    } catch (e) {
+      log(`⚠️ Hotmail error: ${e.message}`);
+    }
+  } else {
+    log("ℹ️ Mode 2FA Only — skipping hotmail.txt load");
   }
 
   let proxyList = [];
   let proxyIndex = 0;
   if (!cfg.useSystemVPN && cfg.proxyEnabled) {
-    try {
-      proxyList = await get9ProxyList();
-      log(`✓ Proxies: ${proxyList.length}`);
-    } catch (e) {
-      log(`❌ Proxy failed: ${e.message}`);
-    }
+    try { proxyList = await get9ProxyList(); log(`✓ Proxies: ${proxyList.length}`); }
+    catch (e) { log(`❌ Proxy failed: ${e.message}`); }
   }
 
   let browser = null;
@@ -1746,11 +1177,7 @@ async function main() {
   for (let i = 0; i < accounts.length; i++) {
     const account = accounts[i];
     log(`\n[${i + 1}/${accounts.length}] ${account.username}`);
-    logProgress({
-      total: accounts.length,
-      current: i + 1,
-      account: account.username,
-    });
+    logProgress({ total: accounts.length, current: i + 1, account: account.username });
 
     const shouldRestart = i % accountsPerProxy === 0 || !browser;
     if (shouldRestart) {
@@ -1780,10 +1207,10 @@ async function main() {
     let result;
 
     try {
-        checkBrowserLocation().then((res) => {
-        console.log("📍 Browser Geolocation:", res.geolocation);
-        console.log("🌐 IP Location:", res.ipLocation);
-        console.log("⚠️ Location mismatch:", res.mismatch);
+      checkBrowserLocation().then((res) => {
+        log(`📍 Geolocation: ${JSON.stringify(res.geolocation)}`);
+        log(`🌐 IP Location: ${res.ipLocation ? res.ipLocation.ip + " " + res.ipLocation.country : "N/A"}`);
+        if (res.mismatch) log(`⚠️ Location mismatch detected!`);
       });
       result = await enable2FA(account, currentPage, hotmailList, i);
     } catch (e) {
@@ -1797,7 +1224,7 @@ async function main() {
       if (result.hotmailSuccess) {
         log(`✅ SUCCESS: ${account.username} + hotmail: ${result.hotmailData?.hotmail}`);
       } else {
-        log(`✅ SUCCESS (2FA only, no hotmail): ${account.username}`);
+        log(`✅ SUCCESS (2FA only): ${account.username}`);
       }
     } else {
       log(`✗ FAILED: ${account.username} — ${result.error || "unknown"}`);
@@ -1805,6 +1232,12 @@ async function main() {
 
     await safeClosePage(currentPage);
     currentPage = null;
+
+    // Kiểm tra graceful stop sau mỗi acc
+    if (shouldStop) {
+      log(`⏹️ Đã dừng graceful: ${cfg.name} (còn ${accounts.length - i - 1} acc chưa xử lý)`);
+      break;
+    }
 
     if (i < accounts.length - 1) {
       const wait = cfg.delayBetweenAccounts || 2000;
