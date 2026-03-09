@@ -12,6 +12,44 @@ const http = require("http");
 const { simpleParser } = require("mailparser");
 const imaps = require("imap-simple");
 
+let shouldStop = false;
+
+// ── AUTO RESTART ON ECONNRESET ────────────────────────────────────────────
+process.on('uncaughtException', (err) => {
+  if (err.code === 'ECONNRESET') {
+    if (process.send) {
+      process.send({ type: 'log', text: '⚠️ ECONNRESET detected' });
+    }
+
+    // Đã có lệnh stop → không restart, thoát hẳn
+    if (shouldStop) {
+      if (process.send) {
+        process.send({ type: 'log', text: '⏹️ Stop signal active — không restart, thoát.' });
+      }
+      process.exit(0);
+      return;
+    }
+
+    if (process.send) {
+      process.send({ type: 'log', text: '🔄 Tự restart sau 5s...' });
+    }
+    setTimeout(() => {
+      const { spawn } = require('child_process');
+      spawn(process.argv[0], process.argv.slice(1), {
+        stdio: 'inherit',
+        detached: false
+      });
+      process.exit(0);
+    }, 5000);
+
+  } else {
+    if (process.send) {
+      process.send({ type: 'log', text: `❌ Uncaught: ${err.message}` });
+    }
+    process.exit(1);
+  }
+});
+
 const configPath = process.argv[2];
 if (!configPath || !fs.existsSync(configPath)) {
   console.error("❌ Worker config not found:", configPath);
@@ -23,7 +61,6 @@ const cfg = JSON.parse(fs.readFileSync(configPath, "utf-8"));
 // ── GRACEFUL STOP ──────────────────────────────────────────────────────────
 // Khi manager gửi {type:"stop"}, set flag này = true
 // Worker sẽ hoàn thành acc hiện tại rồi dừng, không xử lý acc tiếp theo
-let shouldStop = false;
 
 process.on("message", (msg) => {
   if (msg && msg.type === "stop") {
@@ -109,18 +146,18 @@ function logProgress(data) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function safeClosePage(page) {
-  if (page) try { await page.close(); } catch (_) {}
+  if (page) try { await page.close(); } catch (_) { }
 }
 
 async function safeCloseBrowser(browser) {
-  if (browser) try { await browser.close(); } catch (_) {}
+  if (browser) try { await browser.close(); } catch (_) { }
 }
 
 async function safeScreenshot(page, filepath) {
   try {
     await page.screenshot({ path: filepath, fullPage: true });
     log(`📸 ${filepath}`);
-  } catch (_) {}
+  } catch (_) { }
 }
 
 async function gotoIG(page, url) {
@@ -194,8 +231,8 @@ async function tryInputSelectors(page, selectors, value, clickFirst = true) {
 }
 
 function getPlaywright() {
-  try { return require("playwright-core"); } catch (_) {}
-  try { return require("playwright"); } catch (_) {}
+  try { return require("playwright-core"); } catch (_) { }
+  try { return require("playwright"); } catch (_) { }
   throw new Error("Playwright not installed!\nRun: npm install playwright-core && npx playwright install chromium");
 }
 
@@ -279,40 +316,86 @@ async function getVerificationCodeFromEmail(email, password, digitCount) {
   };
 
   log(`📧 IMAP: ${email} (${digitCount}-digit)`);
-  const connection = await imaps.connect(imapCfg);
-  await connection.openBox("INBOX");
 
   const searchStartTime = new Date();
   const maxRetries = cfg.gmxMaxRetries || 10;
   const retryDelay = cfg.gmxRetryDelay || 5000;
 
+  let connection = null;
+
+  const getConnection = async () => {
+    if (connection) {
+      try { await connection.openBox("INBOX"); return connection; } catch (_) {
+        try { connection.end(); } catch (_) {}
+        connection = null;
+      }
+    }
+    log(`⏳ Kết nối IMAP...`);
+    connection = await imaps.connect(imapCfg);
+    await connection.openBox("INBOX");
+    log(`✓ IMAP connected`);
+    return connection;
+  };
+
   try {
+    await getConnection();
+
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       log(`🔍 Email attempt ${attempt}/${maxRetries}`);
-      const messages = await connection.search([["FROM", "Instagram"]], {
-        bodies: ["HEADER", "TEXT", ""],
-        markSeen: false,
-      });
 
-      if (messages.length > 0) {
-        const emailsWithTime = [];
-        for (const message of messages) {
-          const all = message.parts.find((p) => p.which === "");
-          if (!all) continue;
-          const parsed = await simpleParser(all.body);
-          const emailTime = new Date(parsed.date);
-          const bufferTime = new Date(searchStartTime.getTime() - 30000);
-          if (emailTime >= bufferTime) {
-            const code = extractVerificationCode(parsed.text || parsed.html || "", digitCount);
-            if (code) emailsWithTime.push({ uid: message.attributes.uid, date: emailTime, code });
+      try {
+        const conn = await getConnection();
+
+        // Lấy ALL thay vì filter FROM — tránh miss email do format FROM khác nhau
+        const messages = await conn.search(["ALL"], {
+          bodies: ["HEADER", "TEXT", ""],
+          markSeen: false,
+        });
+        log(`📧 Found ${messages.length} total emails`);
+
+        if (messages.length > 0) {
+          const emailsWithTime = [];
+          for (const message of messages) {
+            const all = message.parts.find((p) => p.which === "");
+            if (!all) continue;
+            const parsed = await simpleParser(all.body);
+
+            // Filter Instagram email bằng JS sau khi parse — chắc ăn hơn IMAP search
+            const fromText = (parsed.from?.text || "").toLowerCase();
+            const subject = (parsed.subject || "").toLowerCase();
+            const isFromInstagram = fromText.includes("instagram") ||
+                                    fromText.includes("facebookmail") ||
+                                    subject.includes("instagram");
+            if (!isFromInstagram) continue;
+
+            const emailTime = new Date(parsed.date);
+            const bufferTime = new Date(searchStartTime.getTime() - 30000);
+            if (emailTime >= bufferTime) {
+              const code = extractVerificationCode(parsed.text || parsed.html || "", digitCount);
+              if (code) {
+                log(`📨 Found code in email from: ${parsed.from?.text} | subject: ${parsed.subject}`);
+                emailsWithTime.push({ uid: message.attributes.uid, date: emailTime, code });
+              }
+            }
+          }
+
+          emailsWithTime.sort((a, b) => b.date - a.date);
+          if (emailsWithTime.length > 0) {
+            const latest = emailsWithTime[0];
+            await conn.addFlags(latest.uid, "\\Seen");
+            log(`✓ Code: ${latest.code}`);
+            return latest.code;
+          } else {
+            log(`⚠️ No Instagram email with ${digitCount}-digit code found yet`);
           }
         }
-        emailsWithTime.sort((a, b) => b.date - a.date);
-        if (emailsWithTime.length > 0) {
-          const latest = emailsWithTime[0];
-          await connection.addFlags(latest.uid, "\\Seen");
-          log(`✓ Code: ${latest.code}`);
-          return latest.code;
+
+      } catch (err) {
+        log(`⚠️ Attempt ${attempt} error: ${err.message}`);
+        if (err.code === 'ECONNRESET' || err.source === 'socket') {
+          log(`🔄 Connection lost, sẽ reconnect ở lần sau...`);
+          try { connection.end(); } catch (_) {}
+          connection = null;
         }
       }
 
@@ -321,9 +404,13 @@ async function getVerificationCodeFromEmail(email, password, digitCount) {
         await sleep(retryDelay);
       }
     }
+
     throw new Error(`Code not found after ${maxRetries} attempts`);
+
   } finally {
-    try { connection.end(); } catch (_) {}
+    if (connection) {
+      try { await connection.end(); log(`✓ IMAP closed`); } catch (_) {}
+    }
   }
 }
 
@@ -406,11 +493,14 @@ async function getHotmailVerificationCode(page, hotmailData) {
         log(`⚠️ Hotmail attempt ${attempt}: ${err.message.substring(0, 60)}`);
       }
       await sleep(5000);
-      try { await mailPage.reload({ waitUntil: "domcontentloaded" }); } catch (_) {}
+      try { await mailPage.reload({ waitUntil: "domcontentloaded" }); } catch (_) { }
     }
     throw new Error("Cannot get hotmail code after retries");
+  } catch (err) {
+    log(`❌ Error getting hotmail code: ${err.message}`);
+    throw err;
   } finally {
-    try { await mailPage.close(); } catch (_) {}
+    try { await mailPage.close(); } catch (_) { }
   }
 }
 
@@ -493,9 +583,10 @@ function writeNoHotmailAccount(account, twoFASecret, hotmailError) {
 }
 
 function writeFailedAccount(account, reason) {
-  const line = `${account.username}|${account.password}|${account.igEmail}|${account.gmxMail}|${account.gmxPassword}|${account.posts}|${account.followers}|${account.following}|${account.cookies}|${reason}\n`;
+  const cleanReason = (reason || "").replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+  const line = `${account.username}|${account.password}|${account.igEmail}|${account.gmxMail}|${account.gmxPassword}|${account.posts}|${account.followers}|${account.following}|${account.cookies}|${cleanReason}\n`;
   fs.appendFileSync(FAILED_FILE, line, "utf-8");
-  log(`📝 Failed: ${account.username} — ${reason}`);
+  log(`📝 Failed: ${account.username} — ${cleanReason}`);
 }
 
 function removeAccountFromInput(username) {
@@ -800,6 +891,8 @@ async function addHotmailToAccount(page, account, hotmailData) {
 // ============================================================================
 
 async function enable2FA(account, page, hotmailList, hotmailIndex) {
+
+
   const TWO_FA_URL = "https://accountscenter.instagram.com/password_and_security/two_factor/";
 
   log(`\n=== Processing: ${account.username} ===`);
@@ -1099,34 +1192,28 @@ async function enable2FA(account, page, hotmailList, hotmailIndex) {
   }
 }
 
-async function checkBrowserLocation() {
-  const result = { geolocation: null, ipLocation: null, mismatch: false, error: null };
-  try {
-    result.geolocation = await new Promise((resolve, reject) => {
-      if (!navigator.geolocation) return reject("Geolocation not supported");
-      navigator.geolocation.getCurrentPosition(
-        (pos) => resolve({ latitude: pos.coords.latitude, longitude: pos.coords.longitude, accuracy: pos.coords.accuracy }),
-        (err) => reject(err.message),
-        { enableHighAccuracy: true, timeout: 10000 },
-      );
-    });
-  } catch (e) { result.error = "Geolocation error: " + e; }
 
-  try {
-    const res = await fetch("https://ipinfo.io/json");
-    const data = await res.json();
-    if (data.loc) {
-      const [lat, lon] = data.loc.split(",");
-      result.ipLocation = { latitude: Number(lat), longitude: Number(lon), city: data.city, country: data.country, ip: data.ip };
+async function checkBrowserLocationInPage(page) {
+  return await page.evaluate(async () => {
+    const result = {
+      ipLocation: null,
+      error: null,
+    };
+
+    try {
+      const res = await fetch("https://ipinfo.io/json", { timeout: 5000 });
+      const data = await res.json();
+      result.ipLocation = {
+        ip: data.ip,
+        city: data.city,
+        country: data.country,
+      };
+    } catch (e) {
+      result.error = e.message;
     }
-  } catch (e) { result.error = "IP location error: " + e; }
 
-  if (result.geolocation && result.ipLocation) {
-    const latDiff = Math.abs(result.geolocation.latitude - result.ipLocation.latitude);
-    const lonDiff = Math.abs(result.geolocation.longitude - result.ipLocation.longitude);
-    if (latDiff > 1 || lonDiff > 1) result.mismatch = true;
-  }
-  return result;
+    return result;
+  });
 }
 
 async function main() {
@@ -1205,13 +1292,12 @@ async function main() {
 
     const startTime = Date.now();
     let result;
-
     try {
-      checkBrowserLocation().then((res) => {
-        log(`📍 Geolocation: ${JSON.stringify(res.geolocation)}`);
-        log(`🌐 IP Location: ${res.ipLocation ? res.ipLocation.ip + " " + res.ipLocation.country : "N/A"}`);
-        if (res.mismatch) log(`⚠️ Location mismatch detected!`);
-      });
+      const geoCheck = await checkBrowserLocationInPage(currentPage);
+      const ip = geoCheck.ipLocation?.ip || "N/A";
+      const city = geoCheck.ipLocation?.city || "N/A";
+      const country = geoCheck.ipLocation?.country || "N/A";
+      log(`🌐 IP: ${ip} | City: ${city} | Country: ${country}`);
       result = await enable2FA(account, currentPage, hotmailList, i);
     } catch (e) {
       log(`✗ Unexpected error: ${e.message}`);

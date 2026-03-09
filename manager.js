@@ -13,10 +13,15 @@ const { fork } = require("child_process");
 const os = require("os");
 
 // ============================================================================
+// ROOT DIR — luôn là folder chứa manager.js thực sự, dù chạy từ đâu
+// ============================================================================
+const ROOT_DIR = path.dirname(fs.realpathSync(process.argv[1]));
+
+// ============================================================================
 // STATE
 // ============================================================================
 
-const CONFIG_FILE = path.join(__dirname, "manager_config.json");
+const CONFIG_FILE = path.join(ROOT_DIR, "manager_config.json");
 
 const DEFAULT_CONFIG = {
   chromePath: detectChromePath(),
@@ -85,7 +90,7 @@ function detectChromePath() {
     process.env.LOCALAPPDATA
       ? path.join(
           process.env.LOCALAPPDATA,
-          "Google\\Chrome\\Application\\chrome.exe"
+          "Google\\Chrome\\Application\\chrome.exe",
         )
       : "",
     "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
@@ -102,15 +107,40 @@ function detectChromePath() {
   return "";
 }
 
+/**
+ * Normalize dataDir về đường dẫn tương đối so với ROOT_DIR.
+ * - Nếu đã là relative → giữ nguyên
+ * - Nếu là absolute và nằm trong ROOT_DIR → convert về relative
+ * - Nếu là absolute ngoài ROOT_DIR (máy cũ, ổ khác) → fallback data/threadX
+ */
+function toRelativeDataDir(dataDir) {
+  if (!dataDir) return "data/thread1";
+  if (!path.isAbsolute(dataDir)) return dataDir.replace(/\\/g, "/");
+
+  const rel = path.relative(ROOT_DIR, dataDir);
+  // path.relative trả về ".." nếu nằm ngoài ROOT_DIR
+  if (!rel.startsWith("..") && !path.isAbsolute(rel)) {
+    return rel.replace(/\\/g, "/");
+  }
+
+  // Nằm ngoài hoàn toàn → fallback dựa theo tên folder cuối
+  const match = dataDir.match(/[/\\]?(thread\d+)\s*$/i);
+  if (match) return `data/${match[1]}`;
+
+  // Worst case: lấy tên folder cuối cùng
+  return `data/${path.basename(dataDir)}`;
+}
+
 function loadConfig() {
   if (fs.existsSync(CONFIG_FILE)) {
     try {
       const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8"));
-      // Đảm bảo mỗi thread có field mode (backward compat)
       if (cfg.threads) {
         cfg.threads = cfg.threads.map((t) => ({
           mode: "2fa_hotmail",
           ...t,
+          // Tự động normalize dataDir về relative khi load
+          dataDir: toRelativeDataDir(t.dataDir),
         }));
       }
       return cfg;
@@ -122,7 +152,15 @@ function loadConfig() {
 }
 
 function saveConfig(cfg) {
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), "utf-8");
+  // Đảm bảo luôn lưu dataDir dạng relative
+  const cfgToSave = {
+    ...cfg,
+    threads: cfg.threads.map((t) => ({
+      ...t,
+      dataDir: toRelativeDataDir(t.dataDir),
+    })),
+  };
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfgToSave, null, 2), "utf-8");
 }
 
 function createDefaultThread(id) {
@@ -130,13 +168,13 @@ function createDefaultThread(id) {
     ...DEFAULT_THREAD_CONFIG,
     id,
     name: `Thread ${id}`,
-    dataDir: path.join(__dirname, "data", `thread${id}`),
+    dataDir: `data/thread${id}`,
   };
 }
 
 function resolveDataDir(dataDir) {
-  if (path.isAbsolute(dataDir)) return dataDir;
-  return path.join(__dirname, dataDir);
+  const normalized = toRelativeDataDir(dataDir);
+  return path.join(ROOT_DIR, normalized);
 }
 
 function ensureDataDir(dataDir) {
@@ -160,33 +198,31 @@ function ensureDataDir(dataDir) {
 function getThreadStats(dataDir) {
   const stats = { input: 0, success: 0, failed: 0 };
   try {
-    dataDir = resolveDataDir(dataDir);
-    const inputFile = path.join(dataDir, "input.txt");
+    const absDir = resolveDataDir(dataDir);
+
+    const inputFile = path.join(absDir, "input.txt");
     if (fs.existsSync(inputFile)) {
-      const lines = fs
+      stats.input = fs
         .readFileSync(inputFile, "utf-8")
         .trim()
         .split("\n")
-        .filter(Boolean);
-      stats.input = lines.length;
+        .filter(Boolean).length;
     }
-    const successFile = path.join(dataDir, "success.txt");
+    const successFile = path.join(absDir, "success.txt");
     if (fs.existsSync(successFile)) {
-      const lines = fs
+      stats.success = fs
         .readFileSync(successFile, "utf-8")
         .trim()
         .split("\n")
-        .filter(Boolean);
-      stats.success = lines.length;
+        .filter(Boolean).length;
     }
-    const failedFile = path.join(dataDir, "failed.txt");
+    const failedFile = path.join(absDir, "failed.txt");
     if (fs.existsSync(failedFile)) {
-      const lines = fs
+      stats.failed = fs
         .readFileSync(failedFile, "utf-8")
         .trim()
         .split("\n")
-        .filter(Boolean);
-      stats.failed = lines.length;
+        .filter(Boolean).length;
     }
   } catch (e) {}
   return stats;
@@ -337,7 +373,7 @@ class IGManagerUI {
       border: { type: "line" },
       style: { border: { fg: "magenta" }, label: { fg: "magenta" } },
       scrollable: true,
-      alwaysScroll: false,  // false = cho phép user scroll lên coi log cũ
+      alwaysScroll: false,
       scrollbar: { style: { bg: "magenta" }, track: { bg: "black" } },
       mouse: true,
       keys: true,
@@ -357,7 +393,6 @@ class IGManagerUI {
     });
 
     // ── BOTTOM PROGRESS BARS ─────────────────────────────────────────────────
-    // Scrollable để hiển thị tất cả threads
     this.widgets.progressBar = blessed.box({
       parent: s,
       bottom: 0,
@@ -436,7 +471,6 @@ class IGManagerUI {
   showConfirm(message, color, onConfirm) {
     const s = this.screen;
 
-    // Tránh mở 2 dialog chồng nhau
     if (this._confirmOpen) return;
     this._confirmOpen = true;
 
@@ -470,7 +504,8 @@ class IGManagerUI {
       top: 3,
       left: 2,
       width: "100%-4",
-      content: " {black-fg}{green-bg} Enter {/} {green-fg}Xác nhận{/}    {black-fg}{red-bg} Esc/Q {/} {red-fg}Hủy bỏ{/}",
+      content:
+        " {black-fg}{green-bg} Enter {/} {green-fg}Xác nhận{/}    {black-fg}{red-bg} Esc/Q {/} {red-fg}Hủy bỏ{/}",
       tags: true,
       style: { bg: "black" },
     });
@@ -485,7 +520,6 @@ class IGManagerUI {
       s.render();
     };
 
-    // Bắt TẤT CẢ phím — chỉ enter/esc/q là có tác dụng, phím khác bị nuốt
     dialog.key(["enter"], () => {
       closeDialog();
       onConfirm();
@@ -495,14 +529,10 @@ class IGManagerUI {
       closeDialog();
     });
 
-    // Phím bất kỳ khác → re-focus lại dialog để không bị mất focus
     dialog.on("keypress", (ch, key) => {
-      if (!closed) {
-        dialog.focus();
-      }
+      if (!closed) dialog.focus();
     });
 
-    // Click ra ngoài dialog → đóng
     s.once("element click", (el) => {
       if (el !== dialog) closeDialog();
     });
@@ -546,6 +576,7 @@ class IGManagerUI {
       "{yellow-fg}dataDir{/}",
       "  Thư mục chứa dữ liệu của thread (input.txt, success.txt, failed.txt,",
       "  hotmail.txt, screenshots/). Mỗi thread nên có thư mục riêng.",
+      "  {gray-fg}Luôn lưu dạng tương đối (vd: data/thread1) để portable.{/}",
       "",
       "{yellow-fg}enabled{/}",
       "  Bật/tắt thread. Nếu false thì [A] Start All sẽ bỏ qua thread này.",
@@ -665,14 +696,14 @@ class IGManagerUI {
       s.render();
     });
 
-    this.widgets.helpBox && this.widgets.helpBox.key(["escape", "h", "H"], () => {
-      this.widgets.helpBox.hidden = true;
-      this.widgets.threadList.focus();
-      s.render();
-    });
+    this.widgets.helpBox &&
+      this.widgets.helpBox.key(["escape", "h", "H"], () => {
+        this.widgets.helpBox.hidden = true;
+        this.widgets.threadList.focus();
+        s.render();
+      });
 
     s.key(["q", "C-c"], () => {
-      // Không thoát khi đang có confirm dialog hoặc modal mở
       if (this._confirmOpen || !this.widgets.modal.hidden) return;
       this.shutdown();
     });
@@ -714,7 +745,7 @@ class IGManagerUI {
       const thread = this.config.threads[this.selectedThread];
       const folder = thread
         ? resolveDataDir(thread.dataDir)
-        : path.join(__dirname, "data");
+        : path.join(ROOT_DIR, "data");
 
       const { exec } = require("child_process");
       if (process.platform === "win32") {
@@ -727,7 +758,7 @@ class IGManagerUI {
 
       this.addLog(
         thread ? thread.id : null,
-        `{cyan-fg}📂 Mở thư mục: ${folder}{/}`
+        `{cyan-fg}📂 Mở thư mục: ${folder}{/}`,
       );
     });
 
@@ -745,12 +776,10 @@ class IGManagerUI {
     });
 
     s.key(["escape"], () => {
-      // Escape luôn hoạt động — đóng mọi thứ đang mở
-      if (this._confirmOpen) return; // confirm dialog tự xử lý
+      if (this._confirmOpen) return;
       this.closeModal();
     });
 
-    // C-c global safety: luôn thoát được dù UI bị treo
     s.key(["C-c"], () => {
       this.shutdown();
     });
@@ -766,44 +795,50 @@ class IGManagerUI {
   // ── THREAD MANAGEMENT ──────────────────────────────────────────────────────
 
   addThread() {
-    // Gap filling — tìm số nhỏ nhất chưa được dùng (1, 2, 3, ...)
-    const existingNums = new Set(this.config.threads.map((t) => {
-      const m = t.name.match(/\d+$/);
-      return m ? parseInt(m[0]) : 0;
-    }));
+    const existingNums = new Set(
+      this.config.threads.map((t) => {
+        const m = t.name.match(/\d+$/);
+        return m ? parseInt(m[0]) : 0;
+      }),
+    );
     let num = 1;
     while (existingNums.has(num)) num++;
-    this.showConfirm(
-      `{cyan-fg}Tạo mới Thread ${num}?{/}`,
-      "cyan",
-      () => {
-        const id = Date.now();
-        const newThread = createDefaultThread(num);
-        newThread.id = id;
-        newThread.name = `Thread ${num}`;
-        newThread.dataDir = path.join(__dirname, "data", `thread${num}`);
-        this.config.threads.push(newThread);
-        // Sắp xếp lại theo số thứ tự trong tên
-        this.config.threads.sort((a, b) => {
-          const na = parseInt((a.name.match(/\d+$/) || [0])[0]);
-          const nb = parseInt((b.name.match(/\d+$/) || [0])[0]);
-          return na - nb;
-        });
-        ensureDataDir(newThread.dataDir);
-        saveConfig(this.config);
-        this.logs.set(id, []);
-        this.addLog(null, `{green-fg}✓ New thread: ${newThread.name} — ${newThread.dataDir}{/}`);
-        this.addLog(null, `{gray-fg}  Created: input.txt, hotmail.txt, success.txt, failed.txt{/}`);
-        this.render();
-      }
-    );
+
+    this.showConfirm(`{cyan-fg}Tạo mới Thread ${num}?{/}`, "cyan", () => {
+      const id = Date.now();
+      const newThread = createDefaultThread(num);
+      newThread.id = id;
+      newThread.name = `Thread ${num}`;
+      newThread.dataDir = `data/thread${num}`;
+      this.config.threads.push(newThread);
+      this.config.threads.sort((a, b) => {
+        const na = parseInt((a.name.match(/\d+$/) || [0])[0]);
+        const nb = parseInt((b.name.match(/\d+$/) || [0])[0]);
+        return na - nb;
+      });
+      ensureDataDir(newThread.dataDir);
+      saveConfig(this.config);
+      this.logs.set(id, []);
+      this.addLog(
+        null,
+        `{green-fg}✓ New thread: ${newThread.name} — ${resolveDataDir(newThread.dataDir)}{/}`,
+      );
+      this.addLog(
+        null,
+        `{gray-fg}  Created: input.txt, hotmail.txt, success.txt, failed.txt{/}`,
+      );
+      this.render();
+    });
   }
 
   deleteThread() {
     const thread = this.config.threads[this.selectedThread];
     if (!thread) return;
     if (this.runningProcesses.has(thread.id)) {
-      this.addLog(null, `{red-fg}✗ Không thể xóa thread đang chạy: ${thread.name}{/}`);
+      this.addLog(
+        null,
+        `{red-fg}✗ Không thể xóa thread đang chạy: ${thread.name}{/}`,
+      );
       return;
     }
     this.showConfirm(
@@ -811,7 +846,6 @@ class IGManagerUI {
       "red",
       () => {
         this.config.threads.splice(this.selectedThread, 1);
-        // Sắp xếp lại sau khi xóa
         this.config.threads.sort((a, b) => {
           const na = parseInt((a.name.match(/\d+$/) || [0])[0]);
           const nb = parseInt((b.name.match(/\d+$/) || [0])[0]);
@@ -823,7 +857,7 @@ class IGManagerUI {
           this.selectedThread = Math.max(0, this.config.threads.length - 1);
         }
         this.render();
-      }
+      },
     );
   }
 
@@ -840,7 +874,7 @@ class IGManagerUI {
     if (running >= this.config.maxThreads) {
       this.addLog(
         null,
-        `{red-fg}✗ Max threads reached (${this.config.maxThreads}){/}`
+        `{red-fg}✗ Max threads reached (${this.config.maxThreads}){/}`,
       );
       return;
     }
@@ -854,43 +888,38 @@ class IGManagerUI {
     ) {
       this.addLog(
         thread.id,
-        `{red-fg}✗ No input.txt in ${thread.dataDir}{/}`
+        `{red-fg}✗ No input.txt in ${resolveDataDir(thread.dataDir)}{/}`,
       );
       return;
     }
 
     const modeLabel = thread.mode === "2fa_only" ? "2FA Only" : "2FA + Hotmail";
-    this.addLog(thread.id, `{cyan-fg}▶ Starting ${thread.name}... [${modeLabel}]{/}`);
-
-    const workerConfigPath = path.join(
-      resolveDataDir(thread.dataDir),
-      "worker_config.json"
-    );
-    fs.writeFileSync(
-      workerConfigPath,
-      JSON.stringify(
-        { ...thread, chromePath: this.config.chromePath },
-        null,
-        2
-      )
+    this.addLog(
+      thread.id,
+      `{cyan-fg}▶ Starting ${thread.name}... [${modeLabel}]{/}`,
     );
 
-    const child = fork(path.join(__dirname, "worker.js"), [workerConfigPath], {
+    // Worker config luôn dùng đường dẫn tuyệt đối để worker không bị lạc
+    const absDataDir = resolveDataDir(thread.dataDir);
+    const workerConfigPath = path.join(absDataDir, "worker_config.json");
+    const workerConfig = {
+      ...thread,
+      dataDir: absDataDir, // worker nhận absolute
+      chromePath: this.config.chromePath,
+    };
+    fs.writeFileSync(workerConfigPath, JSON.stringify(workerConfig, null, 2));
+
+    const child = fork(path.join(ROOT_DIR, "worker.js"), [workerConfigPath], {
       silent: true,
     });
 
     this.runningProcesses.set(thread.id, child);
 
-    // Chỉ dùng IPC message để nhận log, KHÔNG dùng stdout
-    // Tránh duplicate: worker gửi process.send() → message event
-    // stdout.on("data") drain để tránh buffer đầy, không log
     child.stdout.on("data", () => {});
 
     child.stderr.on("data", (data) => {
       const lines = data.toString().split("\n").filter(Boolean);
-      lines.forEach((line) =>
-        this.addLog(thread.id, `{red-fg}${line}{/}`)
-      );
+      lines.forEach((line) => this.addLog(thread.id, `{red-fg}${line}{/}`));
     });
 
     child.on("message", (msg) => {
@@ -907,7 +936,7 @@ class IGManagerUI {
       const color = code === 0 ? "green-fg" : "red-fg";
       this.addLog(
         thread.id,
-        `{${color}}■ ${thread.name} exited (code: ${code}){/}`
+        `{${color}}■ ${thread.name} exited (code: ${code}){/}`,
       );
       this.render();
     });
@@ -927,7 +956,10 @@ class IGManagerUI {
     const doGraceful = () => {
       try {
         child.send({ type: "stop" });
-        this.addLog(thread.id, `{yellow-fg}⏳ Graceful stop: ${thread.name} (chờ acc hiện tại xong)...{/}`);
+        this.addLog(
+          thread.id,
+          `{yellow-fg}⏳ Graceful stop: ${thread.name} (chờ acc hiện tại xong)...{/}`,
+        );
       } catch (e) {
         doKill();
       }
@@ -935,19 +967,19 @@ class IGManagerUI {
     };
 
     const doKill = () => {
-      try { child.kill("SIGTERM"); } catch(_) {}
+      try {
+        child.kill("SIGTERM");
+      } catch (_) {}
       this.runningProcesses.delete(thread.id);
       this.addLog(thread.id, `{red-fg}■ Kill ngay: ${thread.name}{/}`);
       this.render();
     };
 
-    // Nếu gọi từ stopAll thì graceful mặc định, không hỏi
     if (threadOverride) {
       doGraceful();
       return;
     }
 
-    // Hiện dialog 3 lựa chọn
     this.showStopDialog(thread.name, doGraceful, doKill);
   }
 
@@ -984,7 +1016,8 @@ class IGManagerUI {
       parent: dialog,
       top: 3,
       left: 2,
-      content: " {black-fg}{green-bg} Enter {/} {green-fg}Graceful{/} — chờ acc hiện tại xong rồi dừng",
+      content:
+        " {black-fg}{green-bg} Enter {/} {green-fg}Graceful{/} — chờ acc hiện tại xong rồi dừng",
       tags: true,
       style: { bg: "black" },
     });
@@ -993,7 +1026,8 @@ class IGManagerUI {
       parent: dialog,
       top: 4,
       left: 2,
-      content: " {black-fg}{red-bg} K {/} {red-fg}Kill ngay{/} — dừng hẳn luôn, không chờ",
+      content:
+        " {black-fg}{red-bg} K {/} {red-fg}Kill ngay{/} — dừng hẳn luôn, không chờ",
       tags: true,
       style: { bg: "black" },
     });
@@ -1017,11 +1051,21 @@ class IGManagerUI {
       s.render();
     };
 
-    dialog.key(["enter", "space"], () => { closeDialog(); onGraceful(); });
-    dialog.key(["k", "K"], () => { closeDialog(); onKill(); });
-    dialog.key(["escape"], () => { closeDialog(); });
+    dialog.key(["enter", "space"], () => {
+      closeDialog();
+      onGraceful();
+    });
+    dialog.key(["k", "K"], () => {
+      closeDialog();
+      onKill();
+    });
+    dialog.key(["escape"], () => {
+      closeDialog();
+    });
 
-    dialog.on("keypress", () => { if (!closed) dialog.focus(); });
+    dialog.on("keypress", () => {
+      if (!closed) dialog.focus();
+    });
 
     dialog.focus();
     s.render();
@@ -1069,14 +1113,13 @@ class IGManagerUI {
       { key: "name", label: "Thread Name", type: "text" },
       { key: "dataDir", label: "Data Directory", type: "text" },
       { key: "enabled", label: "Enabled", type: "boolean" },
-      // ── MODE: cycle field với ← → ────────────────────────────────────────
       {
         key: "mode",
         label: "Mode",
         type: "cycle",
         values: ["2fa_only", "2fa_hotmail"],
         descriptions: {
-          "2fa_only":    "Chỉ bật 2FA (không add hotmail)",
+          "2fa_only": "Chỉ bật 2FA (không add hotmail)",
           "2fa_hotmail": "Bật 2FA + Thêm Hotmail",
         },
       },
@@ -1100,11 +1143,7 @@ class IGManagerUI {
         type: "number",
       },
       { key: "delayPageLoad", label: "Delay Page Load (ms)", type: "number" },
-      {
-        key: "retryMaxAttempts",
-        label: "Retry Max Attempts",
-        type: "number",
-      },
+      { key: "retryMaxAttempts", label: "Retry Max Attempts", type: "number" },
       { key: "hotmailApiUrl", label: "Hotmail API URL", type: "text" },
       {
         key: "hotmailMaxRetries",
@@ -1113,24 +1152,32 @@ class IGManagerUI {
       },
     ];
 
-    this.renderModalFields(modal, thread, fields, "THREAD CONFIG", (updated) => {
-      const idx = this.config.threads.findIndex((t) => t.id === thread.id);
-      if (idx >= 0) {
-        Object.assign(this.config.threads[idx], updated);
-        saveConfig(this.config);
-        ensureDataDir(this.config.threads[idx].dataDir);
-        this.addLog(
-          null,
-          `{green-fg}✓ Saved config: ${this.config.threads[idx].name}{/}`
-        );
-        this.addLog(
-          null,
-          `{gray-fg}  mode=${this.config.threads[idx].mode} headless=${this.config.threads[idx].headless} enabled=${this.config.threads[idx].enabled}{/}`
-        );
-      }
-      this.closeModal();
-      this.render();
-    });
+    this.renderModalFields(
+      modal,
+      thread,
+      fields,
+      "THREAD CONFIG",
+      (updated) => {
+        const idx = this.config.threads.findIndex((t) => t.id === thread.id);
+        if (idx >= 0) {
+          // Normalize dataDir trước khi lưu
+          updated.dataDir = toRelativeDataDir(updated.dataDir);
+          Object.assign(this.config.threads[idx], updated);
+          saveConfig(this.config);
+          ensureDataDir(this.config.threads[idx].dataDir);
+          this.addLog(
+            null,
+            `{green-fg}✓ Saved config: ${this.config.threads[idx].name}{/}`,
+          );
+          this.addLog(
+            null,
+            `{gray-fg}  mode=${this.config.threads[idx].mode} headless=${this.config.threads[idx].headless} enabled=${this.config.threads[idx].enabled}{/}`,
+          );
+        }
+        this.closeModal();
+        this.render();
+      },
+    );
 
     this.screen.render();
   }
@@ -1164,8 +1211,7 @@ class IGManagerUI {
       fields,
       "GLOBAL CONFIG",
       (updated) => {
-        this.config.chromePath =
-          updated.chromePath || this.config.chromePath;
+        this.config.chromePath = updated.chromePath || this.config.chromePath;
         this.config.maxThreads =
           parseInt(updated.maxThreads) || this.config.maxThreads;
         if (this.config.maxThreads > 20) this.config.maxThreads = 20;
@@ -1174,7 +1220,7 @@ class IGManagerUI {
         this.addLog(null, `{green-fg}✓ Global config saved{/}`);
         this.closeModal();
         this.render();
-      }
+      },
     );
 
     this.screen.render();
@@ -1240,7 +1286,6 @@ class IGManagerUI {
       items: fields.map((f) => this._formatFieldItem(f, tempData[f.key])),
     });
 
-    // ── Cycle forward (→ / Space) ─────────────────────────────────────────
     const cycleForward = () => {
       if (this.inputMode) return;
       const index = fieldList.selected;
@@ -1248,7 +1293,10 @@ class IGManagerUI {
 
       if (field.type === "boolean") {
         tempData[field.key] = !tempData[field.key];
-        fieldList.setItem(index, this._formatFieldItem(field, tempData[field.key]));
+        fieldList.setItem(
+          index,
+          this._formatFieldItem(field, tempData[field.key]),
+        );
         this.screen.render();
         return;
       }
@@ -1259,20 +1307,21 @@ class IGManagerUI {
         const curIdx = vals.indexOf(cur);
         const nextIdx = (curIdx + 1) % vals.length;
         tempData[field.key] = vals[nextIdx];
-        fieldList.setItem(index, this._formatFieldItem(field, tempData[field.key]));
+        fieldList.setItem(
+          index,
+          this._formatFieldItem(field, tempData[field.key]),
+        );
         this.screen.render();
         return;
       }
     };
 
-    // ── Cycle backward (←) ───────────────────────────────────────────────
     const cycleBack = () => {
       if (this.inputMode) return;
       const index = fieldList.selected;
       const field = fields[index];
 
       if (field.type === "boolean") {
-        // boolean không có hướng, toggle như nhau
         cycleForward();
         return;
       }
@@ -1283,7 +1332,10 @@ class IGManagerUI {
         const curIdx = vals.indexOf(cur);
         const prevIdx = (curIdx - 1 + vals.length) % vals.length;
         tempData[field.key] = vals[prevIdx];
-        fieldList.setItem(index, this._formatFieldItem(field, tempData[field.key]));
+        fieldList.setItem(
+          index,
+          this._formatFieldItem(field, tempData[field.key]),
+        );
         this.screen.render();
         return;
       }
@@ -1292,7 +1344,6 @@ class IGManagerUI {
     fieldList.key(["right", "space"], cycleForward);
     fieldList.key(["left"], cycleBack);
 
-    // ── Enter ─────────────────────────────────────────────────────────────
     fieldList.key(["enter"], () => {
       if (this.inputMode) return;
       const index = fieldList.selected;
@@ -1304,7 +1355,6 @@ class IGManagerUI {
       this._openInlineInput(field, index, tempData, fieldList);
     });
 
-    // ── F2 / C-s Lưu ──────────────────────────────────────────────────────
     const doSave = () => {
       if (this.inputMode) return;
       onSave(tempData);
@@ -1330,7 +1380,7 @@ class IGManagerUI {
     const hint = field.type === "number" ? " (nhập số)" : " (nhập text)";
 
     labelWidget.setContent(
-      `{yellow-fg}▶ ${field.label}${hint} — Enter xác nhận, Esc hủy{/}`
+      `{yellow-fg}▶ ${field.label}${hint} — Enter xác nhận, Esc hủy{/}`,
     );
 
     inputBox.clearValue();
@@ -1361,14 +1411,16 @@ class IGManagerUI {
       if (!this.inputMode) return;
       this.inputMode = false;
       inputRow.hidden = true;
-      // Dừng readInput bằng cách emit submit với value rỗng để cancel
-      try { inputBox.emit("cancel"); } catch(_) {}
-      try { inputBox.cancel(); } catch(_) {}
+      try {
+        inputBox.emit("cancel");
+      } catch (_) {}
+      try {
+        inputBox.cancel();
+      } catch (_) {}
       fieldList.focus();
       this.screen.render();
     };
 
-    // Dùng on() thay vì once() — xử lý mọi keypress khi đang nhập
     const keypressHandler = (ch, key) => {
       if (key && key.name === "escape") {
         inputBox.removeListener("keypress", keypressHandler);
@@ -1377,55 +1429,46 @@ class IGManagerUI {
     };
     inputBox.on("keypress", keypressHandler);
 
-    // Safety timeout: nếu sau 5 phút vẫn còn inputMode → tự reset
-    const safetyTimer = setTimeout(() => {
-      if (this.inputMode) {
-        inputBox.removeListener("keypress", keypressHandler);
-        onEscape();
-      }
-    }, 5 * 60 * 1000);
+    const safetyTimer = setTimeout(
+      () => {
+        if (this.inputMode) {
+          inputBox.removeListener("keypress", keypressHandler);
+          onEscape();
+        }
+      },
+      5 * 60 * 1000,
+    );
 
-    // Clear timer khi đóng bình thường
-    const origCallback = inputBox._readcb;
     inputBox.once("submit", () => clearTimeout(safetyTimer));
     inputBox.once("cancel", () => clearTimeout(safetyTimer));
 
     this.screen.render();
   }
 
-  /**
-   * Format một dòng trong field list
-   * - boolean: icon ON/OFF
-   * - cycle: hiển thị tất cả options, highlight option đang chọn
-   * - number: vàng
-   * - text: trắng
-   */
   _formatFieldItem(field, value) {
     const displayVal = value !== undefined ? String(value) : "";
 
     if (field.type === "boolean") {
-      const icon = value === true ? "{green-fg}[✓ ON ]{/}" : "{red-fg}[✗ OFF]{/}";
+      const icon =
+        value === true ? "{green-fg}[✓ ON ]{/}" : "{red-fg}[✗ OFF]{/}";
       return ` {cyan-fg}${field.label}{/} ${icon}  {gray-fg}←→{/}`;
     }
 
     if (field.type === "cycle") {
       const vals = field.values || [];
-
-      // Map màu cho từng value
       const colorMap = {
-        "2fa_only":    "yellow-fg",
+        "2fa_only": "yellow-fg",
         "2fa_hotmail": "green-fg",
       };
-
-      // Hiển thị tất cả options: option đang chọn được highlight bằng [], còn lại mờ
-      const optionsDisplay = vals.map((v) => {
-        if (v === displayVal) {
-          const c = colorMap[v] || "white-fg";
-          return `{${c}}{bold}[${v}]{/}{/}`;
-        }
-        return `{gray-fg} ${v} {/}`;
-      }).join("{white-fg}|{/}");
-
+      const optionsDisplay = vals
+        .map((v) => {
+          if (v === displayVal) {
+            const c = colorMap[v] || "white-fg";
+            return `{${c}}{bold}[${v}]{/}{/}`;
+          }
+          return `{gray-fg} ${v} {/}`;
+        })
+        .join("{white-fg}|{/}");
       return ` {cyan-fg}${field.label}{/}: ${optionsDisplay}  {gray-fg}← →{/}`;
     }
 
@@ -1433,7 +1476,6 @@ class IGManagerUI {
       return ` {cyan-fg}${field.label}{/}: {yellow-fg}${displayVal}{/}`;
     }
 
-    // text — truncate nếu quá dài
     const maxLen = 35;
     const truncated =
       displayVal.length > maxLen
@@ -1447,10 +1489,15 @@ class IGManagerUI {
     this._confirmOpen = false;
     this.widgets.modal.hidden = true;
     this.widgets.inputRow.hidden = true;
-    try { this.widgets.modalInput.clearValue(); } catch(_) {}
-    try { this.widgets.modalInput.cancel(); } catch(_) {}
-    // Xóa tất cả listener của modalInput để tránh ghost handler
-    try { this.widgets.modalInput.removeAllListeners("keypress"); } catch(_) {}
+    try {
+      this.widgets.modalInput.clearValue();
+    } catch (_) {}
+    try {
+      this.widgets.modalInput.cancel();
+    } catch (_) {}
+    try {
+      this.widgets.modalInput.removeAllListeners("keypress");
+    } catch (_) {}
     this.widgets.threadList.focus();
     this.screen.render();
   }
@@ -1487,15 +1534,9 @@ class IGManagerUI {
       logs = this.globalLogs;
     }
 
-    // Kiểm tra user có đang scroll lên xem log cũ không
-    // Nếu đang ở cuối (hoặc gần cuối) thì auto-scroll, còn không thì giữ nguyên vị trí
     const atBottom = logBox.getScrollPerc() >= 90;
-
     logBox.setContent(logs.slice(-500).join("\n"));
-
-    if (atBottom) {
-      logBox.setScrollPerc(100);
-    }
+    if (atBottom) logBox.setScrollPerc(100);
 
     this.screen.render();
   }
@@ -1513,17 +1554,22 @@ class IGManagerUI {
     const statusColor = running ? "green-fg" : "red-fg";
     const statusText = running ? "▶ RUNNING" : "■ STOPPED";
 
-    // Mode display với màu sắc
-    const modeDisplay = thread.mode === "2fa_only"
-      ? "{yellow-fg}● 2FA Only{/}"
-      : "{green-fg}● 2FA + Hotmail{/}";
+    const modeDisplay =
+      thread.mode === "2fa_only"
+        ? "{yellow-fg}● 2FA Only{/}"
+        : "{green-fg}● 2FA + Hotmail{/}";
+
+    // Hiển thị cả relative và absolute để user biết path thực tế
+    const relDir = toRelativeDataDir(thread.dataDir);
+    const absDir = resolveDataDir(thread.dataDir);
 
     const lines = [
       `{bold}${thread.name}{/}`,
       `{${statusColor}}${statusText}{/}`,
       ``,
       `{cyan-fg}Mode:{/}    ${modeDisplay}`,
-      `{cyan-fg}Dir:{/}     ${thread.dataDir}`,
+      `{cyan-fg}Dir:{/}     {gray-fg}${relDir}{/}`,
+      `{cyan-fg}AbsDir:{/}  {gray-fg}${absDir.substring(0, 28)}...{/}`,
       `{cyan-fg}Enabled:{/} ${thread.enabled}`,
       `{cyan-fg}VPN:{/}     ${thread.useSystemVPN ? "System VPN" : "Proxy"}`,
       thread.proxyEnabled
@@ -1541,20 +1587,18 @@ class IGManagerUI {
   }
 
   refreshStats() {
-    // ── Thread list items ─────────────────────────────────────────────────
     const items = this.config.threads.map((t, i) => {
       const running = this.runningProcesses.has(t.id);
       const stats = getThreadStats(t.dataDir);
 
-      const modeIcon = (t.mode === "2fa_only")
-        ? "{yellow-fg}2FA{/}"
-        : "{green-fg}+HM{/}";
+      const modeIcon =
+        t.mode === "2fa_only" ? "{yellow-fg}2FA{/}" : "{green-fg}+HM{/}";
 
       const statusIcon = running
         ? "{green-fg}▶{/}"
         : t.enabled
-        ? "{gray-fg}■{/}"
-        : "{red-fg}✗{/}";
+          ? "{gray-fg}■{/}"
+          : "{red-fg}✗{/}";
       const selected = i === this.selectedThread ? "{bold}" : "";
       return (
         ` ${statusIcon} ${selected}${t.name}{/} ${modeIcon} ` +
@@ -1564,15 +1608,17 @@ class IGManagerUI {
     this.widgets.threadList.setItems(items);
     this.widgets.threadList.select(this.selectedThread);
 
-    // ── Totals ────────────────────────────────────────────────────────────
     const totalInput = this.config.threads.reduce(
-      (sum, t) => sum + getThreadStats(t.dataDir).input, 0
+      (sum, t) => sum + getThreadStats(t.dataDir).input,
+      0,
     );
     const totalSuccess = this.config.threads.reduce(
-      (sum, t) => sum + getThreadStats(t.dataDir).success, 0
+      (sum, t) => sum + getThreadStats(t.dataDir).success,
+      0,
     );
     const totalFailed = this.config.threads.reduce(
-      (sum, t) => sum + getThreadStats(t.dataDir).failed, 0
+      (sum, t) => sum + getThreadStats(t.dataDir).failed,
+      0,
     );
     const running = this.runningProcesses.size;
 
@@ -1594,7 +1640,6 @@ class IGManagerUI {
     ];
     this.widgets.statsBox.setContent(statsLines.join("\n"));
 
-    // ── Status bar ────────────────────────────────────────────────────────
     const cpu = os.loadavg()[0].toFixed(1);
     const memUsed = Math.round(process.memoryUsage().rss / 1024 / 1024);
     const time = new Date().toLocaleTimeString("vi-VN");
@@ -1604,33 +1649,33 @@ class IGManagerUI {
         `{cyan-fg}CPU:{/} ${cpu}%  ` +
         `{cyan-fg}RAM:{/} ${memUsed}MB  ` +
         `{cyan-fg}Threads Running:{/} ${running}/${this.config.maxThreads}  ` +
-        `{green-fg}✓ ${totalSuccess}{/}  {red-fg}✗ ${totalFailed}{/}`
+        `{green-fg}✓ ${totalSuccess}{/}  {red-fg}✗ ${totalFailed}{/}`,
     );
 
-    // ── PROGRESS BARS: tất cả threads, không giới hạn ─────────────────────
-    // Compact 2-col layout nếu nhiều thread, chia đều 2 cột
     const BAR_WIDTH = 14;
     const threads = this.config.threads;
 
     const makeBar = (t) => {
       const stats = getThreadStats(t.dataDir);
       const total = stats.input || 1;
-      const pct = Math.min(100, Math.max(0, Math.round((stats.success / total) * 100)));
+      const pct = Math.min(
+        100,
+        Math.max(0, Math.round((stats.success / total) * 100)),
+      );
       const filled = Math.min(BAR_WIDTH, Math.floor((pct / 100) * BAR_WIDTH));
       const bar = "█".repeat(filled) + "░".repeat(BAR_WIDTH - filled);
       const isRunning = this.runningProcesses.has(t.id);
       const barColor = isRunning ? "green-fg" : "gray-fg";
       const nameColor = isRunning ? "green-fg" : "white-fg";
-      const modeTag = t.mode === "2fa_only" ? "{yellow-fg}[2FA]{/}" : "{cyan-fg}[+HM]{/}";
-      return ` {${nameColor}}${t.name.substring(0,8).padEnd(8)}{/}${modeTag}{${barColor}}[${bar}]{/}${String(pct).padStart(3)}%{gray-fg}(${stats.success}/${stats.input||0}){/}`;
+      const modeTag =
+        t.mode === "2fa_only" ? "{yellow-fg}[2FA]{/}" : "{cyan-fg}[+HM]{/}";
+      return ` {${nameColor}}${t.name.substring(0, 8).padEnd(8)}{/}${modeTag}{${barColor}}[${bar}]{/}${String(pct).padStart(3)}%{gray-fg}(${stats.success}/${stats.input || 0}){/}`;
     };
 
-    // Chia thành 2 cột nếu > 3 thread để fit vào 2 dòng hiển thị
     let progLines;
     if (threads.length <= 2) {
       progLines = threads.map(makeBar);
     } else {
-      // Ghép 2 thread trên 1 dòng
       progLines = [];
       for (let i = 0; i < threads.length; i += 2) {
         const left = makeBar(threads[i]);
@@ -1656,7 +1701,7 @@ class IGManagerUI {
 
 console.clear();
 
-const DATA_ROOT = path.join(__dirname, "data");
+const DATA_ROOT = path.join(ROOT_DIR, "data");
 if (!fs.existsSync(DATA_ROOT)) fs.mkdirSync(DATA_ROOT, { recursive: true });
 
 const _startupConfig = loadConfig();

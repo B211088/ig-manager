@@ -1,9 +1,9 @@
 {
   "mode": "2fa_only",
-  "id": 1772365441373,
-  "name": "Thread 1",
+  "id": 1772781271104,
+  "name": "Thread 7",
   "enabled": true,
-  "dataDir": "C:\\Users\\ADMIN\\OneDrive\\Documents\\hàng ig\\hàng anh bảo\\ig-manager\\data\\thread1",
+  "dataDir": "C:\\Users\\ADMIN\\OneDrive\\Documents\\hàng ig\\hàng anh bảo\\ig-manager\\data\\thread7",
   "useSystemVPN": true,
   "proxyEnabled": false,
   "proxyApiUrl": "http://127.0.0.1:10000/api/proxy",
